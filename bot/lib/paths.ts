@@ -9,3 +9,4 @@ export const dataDir = path.join(projectRoot, "data");
 export const cacheDir = path.join(dataDir, "cache");
 export const paperBookPath = path.join(dataDir, "paper-book.json");
 export const lastScanPath = path.join(dataDir, "last-scan.json");
+export const weekPath = path.join(dataDir, "week.json");

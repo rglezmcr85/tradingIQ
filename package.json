@@ -7,6 +7,7 @@
     "check": "tsc --noEmit",
     "selfcheck": "tsx bot/lib/selfcheck.ts",
     "scan": "tsx dashboard/scan-cli.ts",
+    "week": "tsx dashboard/week-cli.ts",
     "dashboard": "tsx dashboard/server.ts",
     "dev": "agent-sdk dev"
   },

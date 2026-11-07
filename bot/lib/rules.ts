@@ -14,9 +14,11 @@ export const RULES = {
   rsiBuyMax: 65,
   rsiExtended: 75,
   maxTrailingPe: 40,
-  startingCash: 10_000,
+  startingCash: 50,
   maxPositions: 5,
-  maxPositionWeight: 0.1,
+  /** A new long is one whole share, and only when that share fits in remaining cash. */
+  sharesPerBuy: 1,
+  maxPositionWeight: 1,
 } as const;
 
 export type Bias = "bullish" | "bearish" | "neutral" | "unknown";

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { decide } from "./decision";
 import { reviewLiveOrder } from "./live-gate";
+import { nextCloseRun } from "./week";
 import { applyDecisions, emptyBook, markBook } from "./paper";
 import { writeResearch } from "./research";
 import type { FundamentalReport } from "./fundamentals";
@@ -77,22 +78,30 @@ assert.equal(missing.action, "hold");
 assert.ok(missing.rules.find((rule) => rule.id === "sec-facts" && rule.pass === false));
 
 const book = emptyBook();
+assert.equal(book.startingCash, 50);
+assert.equal(book.cash, 50);
 const analyses = [
-  { symbol: "AAA", decision: buy, technical: tech({ symbol: "AAA", lastClose: 100 }) },
-  { symbol: "BBB", decision: buy, technical: tech({ symbol: "BBB", lastClose: 2500 }) },
+  { symbol: "AAA", decision: buy, technical: tech({ symbol: "AAA", lastClose: 20 }) },
+  { symbol: "BBB", decision: buy, technical: tech({ symbol: "BBB", lastClose: 80 }) },
 ];
 const first = applyDecisions(book, analyses, "2026-11-07T00:00:00.000Z");
 const bought = first.fills.find((fill) => fill.symbol === "AAA");
 assert.equal(bought?.bookAction, "bought");
-assert.equal(bought?.shares, 10);
-assert.equal(first.book.cash, 9000);
+assert.equal(bought?.shares, 1);
+assert.equal(first.book.cash, 30);
 const skipped = first.fills.find((fill) => fill.symbol === "BBB");
 assert.equal(skipped?.bookAction, "skipped");
+assert.equal(skipped?.bookWhy, "Skipped because one share costs more than the remaining cash.");
 const again = applyDecisions(first.book, analyses, "2026-11-07T01:00:00.000Z");
 assert.equal(again.fills.find((fill) => fill.symbol === "AAA")?.bookAction, "skipped");
 const marked = markBook(first.book);
-assert.equal(marked.equity, 10000);
+assert.equal(marked.equity, 50);
 assert.equal(marked.totalPnl, 0);
+const tight = applyDecisions(first.book, [
+  { symbol: "CCC", decision: buy, technical: tech({ symbol: "CCC", lastClose: 40 }) },
+], "2026-11-07T02:00:00.000Z");
+assert.equal(tight.fills[0]?.bookAction, "skipped");
+assert.match(tight.fills[0]?.bookWhy ?? "", /one share costs more than the remaining cash/);
 
 const blocked = reviewLiveOrder(
   { symbol: "AAPL", asset: "equity", side: "buy", quantity: 1, orderType: "market" },
@@ -108,5 +117,10 @@ const flagged = reviewLiveOrder(
 );
 assert.equal(flagged.placed, false);
 assert.ok(flagged.blockers.some((line) => line.includes("shorts") || line.includes("Sell")));
+
+const sameDay = nextCloseRun(new Date("2026-11-07T03:00:00.000Z"));
+assert.equal(sameDay.toISOString(), "2026-11-07T21:30:00.000Z");
+const nextDay = nextCloseRun(new Date("2026-11-07T21:30:00.000Z"));
+assert.equal(nextDay.toISOString(), "2026-11-08T21:30:00.000Z");
 
 console.log("selfcheck ok");

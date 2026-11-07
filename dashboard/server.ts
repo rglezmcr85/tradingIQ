@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { liveGate } from "../bot/lib/live-gate";
 import { loadBook, markBook } from "../bot/lib/paper";
 import { readLastScan, runScan } from "../bot/lib/pipeline";
+import { weekStatus } from "../bot/lib/week";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(here, "public");
@@ -17,7 +18,7 @@ let scanInFlight: Promise<unknown> | null = null;
 async function state() {
   const scan = await readLastScan();
   const paper = scan?.paper ?? markBook(await loadBook());
-  return { scan, paper, live: liveGate() };
+  return { scan, paper, live: liveGate(), week: await weekStatus() };
 }
 
 function send(res: import("node:http").ServerResponse, status: number, body: string, type: string) {

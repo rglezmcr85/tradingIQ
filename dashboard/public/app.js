@@ -188,6 +188,13 @@ function renderBook(paper) {
 function render() {
   const scan = state?.scan ?? null;
   if (scan && !selected) selected = scan.analyses[0]?.symbol ?? null;
+  const lede = document.querySelector("#lede");
+  const week = state?.week;
+  if (lede) {
+    lede.textContent = week?.active
+      ? `$50 paper week through ${week.week.endsAt.slice(0, 16)} UTC. Scan daily at 21:30 UTC. Live orders stay blocked.`
+      : "US-listed scan for a $50 paper book. One whole share only when the price fits in the remaining cash.";
+  }
   badge.textContent = state?.live?.submission === "blocked" ? "Live orders blocked" : "Live path";
   renderStats(scan);
   renderTable(scan);
@@ -195,7 +202,7 @@ function render() {
   renderBook(state.paper);
   const u = scan?.universe;
   footerEl.textContent = u
-    ? `Universe: Nasdaq Trader symbol directories, ${u.listedCommonStocks.toLocaleString("en-US")} common stocks after ETF and test-issue filters. Nasdaq screener returned ${u.screenerRows.toLocaleString("en-US")} rows; ${u.passedScreen.toLocaleString("en-US")} passed price, volume, and market-cap filters. Deep analysis: ${u.analyzed.join(", ") || "none"}. Prices: Yahoo daily chart. Fundamentals: SEC EDGAR company facts, no API key. Screen quotes rank the scan and are not the technical series.`
+    ? `Universe: Nasdaq Trader symbol directories, ${u.listedCommonStocks.toLocaleString("en-US")} common stocks after ETF and test-issue filters. Nasdaq screener returned ${u.screenerRows.toLocaleString("en-US")} rows; ${u.passedScreen.toLocaleString("en-US")} passed price, volume, and market-cap filters. ${Number(u.affordableNames ?? 0).toLocaleString("en-US")} of those have a screen price at or under $${Number(u.priceCeiling ?? 50)}. Deep analysis: ${u.analyzed.join(", ") || "none"}. A buy is one whole share when it fits in remaining cash. Prices: Yahoo daily chart. Fundamentals: SEC EDGAR company facts.`
     : "No scan file yet. The desk does not ship a watchlist.";
 }
 

@@ -9,11 +9,11 @@ Live Robinhood orders stay blocked. The Trading MCP connection is ready for brow
 ```bash
 npm install
 npm run selfcheck
-npm run scan
+npm run week
 npm run dashboard
 ```
 
-Open http://127.0.0.1:4173
+`npm run week` starts a 7-day paper run at $50. It scans once immediately, then every day at 21:30 UTC until the week ends. Open http://127.0.0.1:4173 while that process is running.
 
 ## Desk
 
@@ -28,6 +28,6 @@ Market scan, technical analyst, fundamental analyst, bull and bear note, trader 
 
 ## Paper and live
 
-The paper account starts at $10,000. A new long is at most 10% of equity, five names maximum, whole shares, filled at the last daily close.
+The one-week paper account starts at $50. A new long is one whole share when that price fits in the remaining cash. A name is skipped when one share costs more than the remaining cash. There are no fractional shares. Fills use the last daily close. At most five names.
 
 Robinhood: `https://agent.robinhood.com/mcp/trading` (Streamable HTTP, OAuth 2.1 PKCE, public client). After you want the live path, run `npx @grok/agent-sdk mcp oauth robinhood` and approve it in the browser. Orders stay off until that connection exists and `MYTRADINGIQ_LIVE_ORDERS=confirm`. This build does not submit an order. Reads can span accounts. Any later order stays on the Agentic account and is a long equity or a long option.

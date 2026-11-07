@@ -41,6 +41,8 @@ export type ScanReport = {
     passedScreen: number;
     snapshotFetchedAt: string;
     deepAnalysisLimit: number;
+    priceCeiling: number;
+    affordableNames: number;
     analyzed: string[];
     skipped: Array<{ symbol: string; reason: string }>;
     filters: {
@@ -57,6 +59,7 @@ export type ScanReport = {
     maxTrailingPe: number;
     startingCash: number;
     maxPositions: number;
+    sharesPerBuy: number;
     maxPositionWeight: number;
   };
   analyses: Analysis[];
@@ -64,7 +67,12 @@ export type ScanReport = {
   live: LiveGate;
 };
 
-function candidateRows(ranked: ScreenHit[], openSymbols: string[], limit: number): Array<ScreenHit & { origin: Analysis["origin"] }> {
+function candidateRows(
+  ranked: ScreenHit[],
+  openSymbols: string[],
+  limit: number,
+  priceCeiling: number,
+): Array<ScreenHit & { origin: Analysis["origin"] }> {
   const chosen: Array<ScreenHit & { origin: Analysis["origin"] }> = [];
   const seen = new Set<string>();
   for (const symbol of openSymbols) {
@@ -85,6 +93,7 @@ function candidateRows(ranked: ScreenHit[], openSymbols: string[], limit: number
   for (const hit of ranked) {
     if (chosen.filter((row) => row.origin === "scan").length >= limit) break;
     if (seen.has(hit.symbol)) continue;
+    if (hit.lastSale <= 0 || hit.lastSale > priceCeiling) continue;
     chosen.push({ ...hit, origin: "scan" });
     seen.add(hit.symbol);
   }
@@ -96,7 +105,9 @@ export async function runScan(limit: number = RULES.deepAnalysisDefault): Promis
   const universe = await scanUniverse();
   const book = await loadBook();
   const openSymbols = book.positions.map((position) => position.symbol);
-  const pool = candidateRows(universe.ranked, openSymbols, capped + 16);
+  const priceCeiling = book.startingCash;
+  const pool = candidateRows(universe.ranked, openSymbols, capped + 16, priceCeiling);
+  const affordableNames = universe.ranked.filter((row) => row.lastSale > 0 && row.lastSale <= priceCeiling).length;
   const tickers = await loadTickerMap();
   const drafted: Array<Omit<Analysis, "book">> = [];
   const skipped: Array<{ symbol: string; reason: string }> = [];
@@ -154,6 +165,8 @@ export async function runScan(limit: number = RULES.deepAnalysisDefault): Promis
       passedScreen: universe.passedScreen,
       snapshotFetchedAt: universe.snapshotFetchedAt,
       deepAnalysisLimit: capped,
+      priceCeiling,
+      affordableNames,
       analyzed: analyses.map((row) => row.symbol),
       skipped,
       filters: {
@@ -170,6 +183,7 @@ export async function runScan(limit: number = RULES.deepAnalysisDefault): Promis
       maxTrailingPe: RULES.maxTrailingPe,
       startingCash: RULES.startingCash,
       maxPositions: RULES.maxPositions,
+      sharesPerBuy: RULES.sharesPerBuy,
       maxPositionWeight: RULES.maxPositionWeight,
     },
     analyses,

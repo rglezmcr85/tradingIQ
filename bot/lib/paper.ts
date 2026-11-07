@@ -75,6 +75,7 @@ export async function loadBook(): Promise<PaperBook> {
     const raw = await readFile(paperBookPath, "utf8");
     const parsed = JSON.parse(raw) as PaperBook;
     if (parsed.account !== "paper" || !Array.isArray(parsed.positions)) return emptyBook();
+    if (parsed.startingCash !== RULES.startingCash) return emptyBook();
     return parsed;
   } catch {
     return emptyBook();
@@ -210,22 +211,20 @@ export function applyDecisions(book: PaperBook, analyses: Analyzed[], filledAt: 
       });
       continue;
     }
-    const equity =
-      next.cash + next.positions.reduce((sum, position) => sum + position.shares * position.markPrice, 0);
-    const budget = Math.min(next.cash, equity * next.maxPositionWeight);
     const fillPrice = row.technical.lastClose;
-    const shares = Math.floor(budget / fillPrice);
-    if (shares < 1) {
+    const affordable = Math.floor(next.cash / fillPrice);
+    if (affordable < 1) {
       fills.push({
         symbol: row.symbol,
         signal: "buy",
         bookAction: "skipped",
-        bookWhy: "One share costs more than the 10% size cap or remaining cash.",
+        bookWhy: "Skipped because one share costs more than the remaining cash.",
         shares: null,
         fillPrice,
       });
       continue;
     }
+    const shares = Math.min(RULES.sharesPerBuy, affordable);
     const cost = round2(shares * fillPrice);
     next.cash = round2(next.cash - cost);
     next.positions.push({
@@ -248,7 +247,7 @@ export function applyDecisions(book: PaperBook, analyses: Analyzed[], filledAt: 
       symbol: row.symbol,
       signal: "buy",
       bookAction: "bought",
-      bookWhy: `Bought ${shares} shares at the last daily close ${fillPrice}. Size is capped at 10% of paper equity.`,
+      bookWhy: `Bought ${shares} share at the last daily close ${fillPrice}. One whole share fits in the remaining cash.`,
       shares,
       fillPrice,
     });
