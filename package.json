@@ -9,7 +9,7 @@
     "scan": "tsx dashboard/scan-cli.ts",
     "week": "tsx dashboard/week-cli.ts",
     "dashboard": "tsx dashboard/server.ts",
-    "start": "tsx server.ts",
+    "start": "tsx dashboard/server.ts",
     "dev": "agent-sdk dev"
   },
   "engines": {
