@@ -85,19 +85,32 @@ function emptyReport(partial: Partial<DeskReport> = {}): DeskReport {
   };
 }
 
-export async function readDesk(): Promise<DeskReport> {
+let memory: Store | null = null;
+
+async function readStore(): Promise<Store | null> {
+  if (memory) return memory;
   try {
     const parsed = JSON.parse(await readFile(recommendationsPath, "utf8")) as Store;
-    if (!parsed.report) return emptyReport();
-    return parsed.report;
+    if (!parsed.report) return null;
+    return parsed;
   } catch {
-    return emptyReport();
+    return null;
   }
 }
 
+export async function readDesk(): Promise<DeskReport> {
+  const store = await readStore();
+  return store?.report ?? emptyReport();
+}
+
 async function writeStore(store: Store): Promise<void> {
-  await mkdir(dataDir, { recursive: true });
-  await writeFile(recommendationsPath, JSON.stringify(store, null, 2));
+  memory = store;
+  try {
+    await mkdir(dataDir, { recursive: true });
+    await writeFile(recommendationsPath, JSON.stringify(store, null, 2));
+  } catch {
+    // The in-memory copy still serves this instance when the disk is read-only.
+  }
 }
 
 function orderRequest(order: PlannedOrder, id: string): PaperOrderRequest {
@@ -452,10 +465,8 @@ export async function confirmRecommendation(
   fetchImpl: typeof fetch = fetch,
 ): Promise<{ accepted: boolean; unset: string[]; blocker: string | null; recommendation: Recommendation | null }> {
   const creds = paperCredentials(env);
-  let store: Store;
-  try {
-    store = JSON.parse(await readFile(recommendationsPath, "utf8")) as Store;
-  } catch {
+  const store = await readStore();
+  if (!store) {
     return { accepted: false, unset: creds.ok ? [] : creds.unset, blocker: "No scan is loaded. Run Scan portfolio first.", recommendation: null };
   }
   const recommendation = store.recommendations.find((item) => item.id === id) ?? null;

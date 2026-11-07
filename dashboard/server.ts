@@ -2,14 +2,13 @@ import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { createServer } from "node:http";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { confirmRecommendation, readDesk, runDesk } from "../bot/lib/desk";
 import { liveGate } from "../bot/lib/live-gate";
+import { projectRoot } from "../bot/lib/paths";
 
-const here = path.dirname(fileURLToPath(import.meta.url));
-const publicDir = path.join(here, "public");
+const publicDir = path.join(projectRoot, "public");
 const port = Number(process.env.PORT ?? 4173);
-const host = "127.0.0.1";
+const host = "0.0.0.0";
 
 let deskInFlight: Promise<unknown> | null = null;
 
@@ -74,5 +73,7 @@ const server = createServer(async (req, res) => {
 });
 
 server.listen(port, host, () => {
-  console.log(`MyTradingIQ dashboard http://${host}:${port}`);
+  console.log(`MyTradingIQ dashboard http://127.0.0.1:${port}`);
 });
+
+export default server;
