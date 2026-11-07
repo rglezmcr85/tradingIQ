@@ -34,13 +34,35 @@ function orderLabel(recommendation) {
   return `${order.side} ${order.qty}`;
 }
 
+function ideaTable(rows) {
+  if (!rows.length) return `<p class="muted">None.</p>`;
+  const body = rows
+    .map((row) => {
+      const active = row.id === selected ? "active" : "";
+      const confirm = row.confirmable && row.status === "recommendation"
+        ? `<button class="confirm" type="button" data-confirm="${esc(row.id)}">Confirm this order</button>`
+        : `<span class="muted">${esc(row.status === "confirmed" ? "Confirmed" : row.status === "rejected" ? "Not accepted" : "Not confirmable")}</span>`;
+      return `<tr class="${active}" data-id="${esc(row.id)}">
+        <td><strong>${esc(row.symbol)}</strong><div class="muted">${esc(row.assetClass)}</div></td>
+        <td class="${actionClass(row.action)}">${esc(row.action)}</td>
+        <td>${esc(orderLabel(row))}</td>
+        <td>${confirm}</td>
+      </tr>`;
+    })
+    .join("");
+  return `<table>
+    <thead><tr><th>Name</th><th>Idea</th><th>Order</th><th></th></tr></thead>
+    <tbody>${body}</tbody>
+  </table>`;
+}
+
 function render() {
   const desk = state?.desk ?? null;
   const lede = document.querySelector("#lede");
   if (lede) {
     lede.textContent = desk?.configured
-      ? "Scan portfolio reads Alpaca paper and writes recommendations. Confirm sends only that one paper order, inside the $15,000 sleeve."
-      : "Scan portfolio is manual. Alpaca paper keys are required to load the account. No order is sent by the scan.";
+      ? "Scan portfolio checks names you hold and scans the market for new stock and crypto buys. Confirm sends only that one paper order, inside the $15,000 sleeve."
+      : "Scan portfolio is manual. Alpaca paper keys are required to load the account and the market scan. No order is sent by the scan.";
   }
   badge.textContent = "Robinhood blocked";
   const items = [
@@ -55,52 +77,45 @@ function render() {
     .join("");
 
   const recommendations = desk?.recommendations ?? [];
+  const ownedRows = recommendations.filter((row) => (row.scope ? row.scope === "owned" : row.action !== "buy"));
+  const newRows = recommendations.filter((row) => (row.scope ? row.scope === "new" : row.action === "buy"));
   if (!selected && recommendations[0]) selected = recommendations[0].id;
-  if (!recommendations.length) {
-    const blocker = desk?.blocker ? `<p>${esc(desk.blocker)}</p>` : "";
-    const unset = desk?.unset?.length ? `<p>Unset: ${esc(desk.unset.join(", "))}</p>` : "";
-    tableEl.innerHTML = `${blocker}${unset}<p class="muted">No recommendations yet. Scan portfolio does not send an order.</p>`;
-  } else {
-    const rows = recommendations
-      .map((row) => {
-        const active = row.id === selected ? "active" : "";
-        const confirm = row.confirmable && row.status === "recommendation"
-          ? `<button class="confirm" type="button" data-confirm="${esc(row.id)}">Confirm this order</button>`
-          : `<span class="muted">${esc(row.status === "confirmed" ? "Confirmed" : row.status === "rejected" ? "Not accepted" : "Not confirmable")}</span>`;
-        return `<tr class="${active}" data-id="${esc(row.id)}">
-          <td><strong>${esc(row.symbol)}</strong><div class="muted">${esc(row.assetClass)}</div></td>
-          <td class="${actionClass(row.action)}">${esc(row.action)}</td>
-          <td>${esc(orderLabel(row))}</td>
-          <td>${confirm}</td>
-        </tr>`;
-      })
-      .join("");
-    tableEl.innerHTML = `<table>
-      <thead><tr><th>Name</th><th>Idea</th><th>Order</th><th></th></tr></thead>
-      <tbody>${rows}</tbody>
-    </table>`;
-    for (const tr of tableEl.querySelectorAll("tr[data-id]")) {
-      tr.addEventListener("click", () => {
-        selected = tr.dataset.id;
-        render();
-      });
-    }
-    for (const confirmButton of tableEl.querySelectorAll("button[data-confirm]")) {
-      confirmButton.addEventListener("click", async (event) => {
-        event.stopPropagation();
-        confirmButton.disabled = true;
-        confirmButton.textContent = "Sending";
-        try {
-          await load("/api/confirm", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ id: confirmButton.dataset.confirm }),
-          });
-        } catch (err) {
-          detailEl.innerHTML = `<p class="sell">${esc(err.message)}</p>`;
-        }
-      });
-    }
+  const blocker = desk?.blocker ? `<p>${esc(desk.blocker)}</p>` : "";
+  const unset = desk?.unset?.length ? `<p>Unset: ${esc(desk.unset.join(", "))}</p>` : "";
+  const market = desk?.market;
+  const marketLine = market
+    ? `<p class="muted">Market scan reviewed ${esc(market.stocksReviewed)} new stocks and ${esc(market.cryptoReviewed)} crypto pairs. New buys: ${esc(market.newStockBuys)} stocks, ${esc(market.newCryptoBuys)} crypto. No order is sent.</p>${market.note ? `<p class="sell">${esc(market.note)}</p>` : ""}`
+    : recommendations.length
+      ? ""
+      : `<p class="muted">No recommendations yet. Scan portfolio does not send an order.</p>`;
+  tableEl.innerHTML = `${blocker}${unset}${marketLine}
+    <p class="kicker">Held names</p>
+    <p class="muted">Sell or add on names already in the paper account. Hold is not listed.</p>
+    ${ideaTable(ownedRows)}
+    <p class="kicker">New names</p>
+    <p class="muted">Buy ideas from the market scan, stocks and crypto, that he does not already hold.</p>
+    ${ideaTable(newRows)}`;
+  for (const tr of tableEl.querySelectorAll("tr[data-id]")) {
+    tr.addEventListener("click", () => {
+      selected = tr.dataset.id;
+      render();
+    });
+  }
+  for (const confirmButton of tableEl.querySelectorAll("button[data-confirm]")) {
+    confirmButton.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      confirmButton.disabled = true;
+      confirmButton.textContent = "Sending";
+      try {
+        await load("/api/confirm", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ id: confirmButton.dataset.confirm }),
+        });
+      } catch (err) {
+        detailEl.innerHTML = `<p class="sell">${esc(err.message)}</p>`;
+      }
+    });
   }
 
   const chosen = recommendations.find((row) => row.id === selected);

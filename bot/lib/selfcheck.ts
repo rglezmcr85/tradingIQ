@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { decide } from "./decision";
+import { decide, technicalBuyReady } from "./decision";
+import { selectNewHits } from "./desk";
 import { reviewLiveOrder } from "./live-gate";
 import { nextCloseRun } from "./week";
 import { applyDecisions, emptyBook, markBook } from "./paper";
@@ -12,6 +13,13 @@ const closes = [44, 44.34, 44.09, 43.61, 44.33, 44.83, 45.1, 45.42, 45.84, 46.08
 const rsi14 = rsi(closes, 14);
 assert.ok(rsi14 != null && Math.abs(rsi14 - 72.98387096774191) < 1e-9, `rsi ${rsi14}`);
 assert.equal(sma([1, 2, 3, 4], 4), 2.5);
+assert.equal(technicalBuyReady(tech()), true);
+assert.equal(technicalBuyReady(tech({ trend: "down" })), false);
+assert.equal(technicalBuyReady(tech({ rsi14: 80 })), false);
+assert.deepEqual(
+  selectNewHits([{ symbol: "A" }, { symbol: "B" }, { symbol: "C" }], new Set(["A"]), 2).map((hit) => hit.symbol),
+  ["B", "C"],
+);
 
 function tech(overrides: Partial<TechnicalReport> = {}): TechnicalReport {
   return {

@@ -125,6 +125,19 @@ export function decide(
   return { action, bias, why, rules: [...buyRules, ...sellRules] };
 }
 
+/** Technical buy rules only. Fundamentals are checked later by decide(). */
+export function technicalBuyReady(technical: TechnicalReport): boolean {
+  return (
+    technical.barCount >= RULES.minDailyBars &&
+    technical.lastClose != null &&
+    technical.trend === "up" &&
+    technical.sma20Rising === true &&
+    technical.rsi14 != null &&
+    technical.rsi14 >= RULES.rsiBuyMin &&
+    technical.rsi14 <= RULES.rsiBuyMax
+  );
+}
+
 export type PositionAction = "sell" | "hold" | "add";
 
 /** An open position is sold, held, or added to. Add uses the same buy rules. */

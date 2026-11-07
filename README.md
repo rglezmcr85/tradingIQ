@@ -13,7 +13,7 @@ npm run week
 npm run dashboard
 ```
 
-Open the dashboard with `npm run dashboard` at http://127.0.0.1:4173. Press **Scan portfolio**. That loads the Alpaca paper account and lists recommendations. Press **Confirm this order** on one row to send that order only. The scan does not send an order. The clock does not send an order.
+Open the dashboard with `npm run dashboard` at http://127.0.0.1:4173. Press **Scan portfolio**. That loads the Alpaca paper account and scans the market for new stock and crypto buys. Held names are sell or add. New names are buys. Press **Confirm this order** on one row to send that order only. The scan does not send an order. The clock does not send an order.
 
 ## Desk
 
