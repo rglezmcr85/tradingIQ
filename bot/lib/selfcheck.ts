@@ -123,4 +123,105 @@ assert.equal(sameDay.toISOString(), "2026-11-07T21:30:00.000Z");
 const nextDay = nextCloseRun(new Date("2026-11-07T21:30:00.000Z"));
 assert.equal(nextDay.toISOString(), "2026-11-08T21:30:00.000Z");
 
+const { deskReason } = await import("./desk-reason");
+const { confirmRecommendation } = await import("./desk");
+const { submitPaperOrder } = await import("./alpaca-paper");
+
+const ready = deskReason({
+  symbol: "KDP",
+  action: "buy",
+  technical: { asOf: "2026-11-06", lastClose: 36.63, sma20: 35, sma50: 33, rsi14: 52, trend: "up" },
+  fundamental: { source: "sec-edgar-companyfacts", netIncome: 100, revenueGrowth: 0.08, trailingPe: 20, marketCap: null },
+  orderLine: "One Alpaca paper buy qty 1 day order.",
+});
+assert.equal(ready.confirmable, true);
+assert.match(ready.reason, /Technicals \(Yahoo daily chart/);
+assert.match(ready.reason, /Fundamentals \(SEC company facts\)/);
+
+const thin = deskReason({
+  symbol: "BTC/USD",
+  action: "add",
+  technical: { asOf: "2026-11-06", lastClose: 64000, sma20: 60000, sma50: 58000, rsi14: 55, trend: "up" },
+  fundamental: { source: "unavailable", netIncome: null, revenueGrowth: null, trailingPe: null, marketCap: null },
+  orderLine: "No order was sized.",
+});
+assert.equal(thin.confirmable, false);
+assert.match(thin.reason, /Technicals/);
+assert.match(thin.reason, /Fundamentals: missing/);
+
+let called = false;
+const noScan = await confirmRecommendation("00000000-0000-4000-8000-000000000000", {}, async () => {
+  called = true;
+  return new Response("{}", { status: 200 });
+});
+assert.equal(called, false);
+assert.equal(noScan.accepted, false);
+assert.ok(noScan.unset.includes("ALPACA_API_KEY"));
+assert.ok(noScan.unset.includes("ALPACA_SECRET_KEY"));
+
+const refused = await submitPaperOrder(
+  { symbol: "KDP", side: "buy", qty: "1", notional: null, timeInForce: "day", clientOrderId: "mtqtest" },
+  { ALPACA_API_KEY: "test-key", ALPACA_SECRET_KEY: "test-secret", ALPACA_PAPER_TRADE: "false" },
+  async () => {
+    called = true;
+    return new Response("{}", { status: 200 });
+  },
+);
+assert.equal(called, false);
+assert.equal(refused.accepted, false);
+assert.match(refused.blocker ?? "", /ALPACA_PAPER_TRADE/);
+
+const { readFile, writeFile, mkdir, rm } = await import("node:fs/promises");
+const { recommendationsPath, dataDir } = await import("./paths");
+await mkdir(dataDir, { recursive: true });
+let previous = "";
+try {
+  previous = await readFile(recommendationsPath, "utf8");
+} catch {
+  previous = "";
+}
+const fixtureId = "11111111-1111-4111-8111-111111111111";
+await writeFile(
+  recommendationsPath,
+  JSON.stringify({
+    recommendations: [
+      {
+        id: fixtureId,
+        symbol: "KDP",
+        name: "Keurig Dr Pepper",
+        assetClass: "us_equity",
+        action: "buy",
+        reason: "Buy KDP. Technicals and fundamentals are present in this fixture.",
+        confirmable: true,
+        blocker: null,
+        order: {
+          symbol: "KDP",
+          assetClass: "us_equity",
+          side: "buy",
+          qty: "1",
+          notional: null,
+          timeInForce: "day",
+          reason: "fixture",
+          estimatedQty: 1,
+          estimatedPrice: 36.63,
+          estimatedNotional: 36.63,
+        },
+        status: "recommendation",
+        alpacaOrderId: null,
+      },
+    ],
+    report: { ok: true, recommendations: [] },
+  }),
+);
+called = false;
+const held = await confirmRecommendation(fixtureId, {}, async () => {
+  called = true;
+  return new Response("{}", { status: 200 });
+});
+assert.equal(called, false);
+assert.equal(held.accepted, false);
+assert.match(held.blocker ?? "", /ALPACA_API_KEY/);
+if (previous) await writeFile(recommendationsPath, previous);
+else await rm(recommendationsPath, { force: true });
+
 console.log("selfcheck ok");

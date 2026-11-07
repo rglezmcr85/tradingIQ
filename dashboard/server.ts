@@ -3,27 +3,29 @@ import { stat } from "node:fs/promises";
 import { createServer } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { confirmRecommendation, readDesk, runDesk } from "../bot/lib/desk";
 import { liveGate } from "../bot/lib/live-gate";
-import { loadBook, markBook } from "../bot/lib/paper";
-import { readLastScan, runScan } from "../bot/lib/pipeline";
-import { weekStatus } from "../bot/lib/week";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(here, "public");
 const port = Number(process.env.PORT ?? 4173);
 const host = "127.0.0.1";
 
-let scanInFlight: Promise<unknown> | null = null;
+let deskInFlight: Promise<unknown> | null = null;
 
 async function state() {
-  const scan = await readLastScan();
-  const paper = scan?.paper ?? markBook(await loadBook());
-  return { scan, paper, live: liveGate(), week: await weekStatus() };
+  return { desk: await readDesk(), live: liveGate() };
 }
 
 function send(res: import("node:http").ServerResponse, status: number, body: string, type: string) {
   res.writeHead(status, { "content-type": type, "cache-control": "no-store" });
   res.end(body);
+}
+
+async function readBody(req: import("node:http").IncomingMessage): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  return Buffer.concat(chunks).toString("utf8");
 }
 
 const server = createServer(async (req, res) => {
@@ -34,14 +36,21 @@ const server = createServer(async (req, res) => {
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/scan") {
-      if (!scanInFlight) {
-        const limit = Number(url.searchParams.get("limit") ?? "8");
-        scanInFlight = runScan(limit).finally(() => {
-          scanInFlight = null;
+      if (!deskInFlight) {
+        deskInFlight = runDesk().finally(() => {
+          deskInFlight = null;
         });
       }
-      await scanInFlight;
+      await deskInFlight;
       send(res, 200, JSON.stringify(await state()), "application/json");
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/api/confirm") {
+      const raw = await readBody(req);
+      const body = raw ? (JSON.parse(raw) as { id?: string }) : {};
+      const id = typeof body.id === "string" ? body.id : "";
+      const result = await confirmRecommendation(id);
+      send(res, 200, JSON.stringify({ ...(await state()), confirm: result }), "application/json");
       return;
     }
     const rel = url.pathname === "/" ? "index.html" : url.pathname.slice(1);

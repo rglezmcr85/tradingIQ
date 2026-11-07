@@ -1,0 +1,511 @@
+import { randomUUID } from "node:crypto";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import {
+  createAlpacaPaper,
+  paperCredentials,
+  submitPaperOrder,
+  type AlpacaAsset,
+  type AlpacaPosition,
+  type PaperOrderRequest,
+} from "./alpaca-paper";
+import { deskReason, type DeskFacts } from "./desk-reason";
+import { decide, decideCrypto, managePosition, type Decision } from "./decision";
+import { loadTickerMap, pullFundamentals, type FundamentalReport } from "./fundamentals";
+import { fetchText } from "./http";
+import { dataDir, recommendationsPath } from "./paths";
+import { pullDailyBars } from "./prices";
+import { writeResearch } from "./research";
+import {
+  applyAcceptedOrder,
+  CASH_SKIP,
+  loadSleeve,
+  planSleeve,
+  saveSleeve,
+  SLEEVE_CAP,
+  spendable,
+  openCost,
+  type PlannedOrder,
+  type SleeveFile,
+  type SleeveReview,
+} from "./sleeve";
+import { buildTechnicalReport, type TechnicalReport } from "./technicals";
+import { scanUniverse } from "./universe";
+
+const STOCK_TRIES = 12;
+const CRYPTO_TRIES = 6;
+
+export type Recommendation = {
+  id: string;
+  symbol: string;
+  name: string;
+  assetClass: "us_equity" | "crypto";
+  action: "buy" | "add" | "sell";
+  reason: string;
+  confirmable: boolean;
+  blocker: string | null;
+  order: PlannedOrder | null;
+  status: "recommendation" | "confirmed" | "rejected";
+  alpacaOrderId: string | null;
+};
+
+export type DeskReport = {
+  ok: true;
+  generatedAt: string | null;
+  configured: boolean;
+  unset: string[];
+  blocker: string | null;
+  cap: typeof SLEEVE_CAP;
+  crypto: true;
+  alpacaEquity: number | null;
+  alpacaBuyingPower: number | null;
+  sleeveCash: number;
+  buyingPowerUsed: number;
+  portfolio: Array<{ symbol: string; qty: number; marketValue: number | null; assetClass: "us_equity" | "crypto" }>;
+  recommendations: Recommendation[];
+};
+
+type Store = { recommendations: Recommendation[]; report: DeskReport };
+
+function emptyReport(partial: Partial<DeskReport> = {}): DeskReport {
+  return {
+    ok: true,
+    generatedAt: null,
+    configured: false,
+    unset: [],
+    blocker: null,
+    cap: SLEEVE_CAP,
+    crypto: true,
+    alpacaEquity: null,
+    alpacaBuyingPower: null,
+    sleeveCash: SLEEVE_CAP,
+    buyingPowerUsed: 0,
+    portfolio: [],
+    recommendations: [],
+    ...partial,
+  };
+}
+
+export async function readDesk(): Promise<DeskReport> {
+  try {
+    const parsed = JSON.parse(await readFile(recommendationsPath, "utf8")) as Store;
+    if (!parsed.report) return emptyReport();
+    return parsed.report;
+  } catch {
+    return emptyReport();
+  }
+}
+
+async function writeStore(store: Store): Promise<void> {
+  await mkdir(dataDir, { recursive: true });
+  await writeFile(recommendationsPath, JSON.stringify(store, null, 2));
+}
+
+function orderRequest(order: PlannedOrder, id: string): PaperOrderRequest {
+  return {
+    symbol: order.symbol,
+    side: order.side,
+    qty: order.qty,
+    notional: order.notional,
+    timeInForce: order.timeInForce,
+    clientOrderId: `mtq${id.replace(/-/g, "")}`.slice(0, 48),
+  };
+}
+
+function orderLine(order: PlannedOrder | null, skip: string | null): string {
+  if (!order) {
+    return skip ?? "No Alpaca paper order was sized. Nothing will be sent.";
+  }
+  const size = order.notional != null ? `notional $${order.notional}` : `qty ${order.qty}`;
+  return `One Alpaca paper ${order.side} ${size} ${order.timeInForce} order. Nothing is sent until this order is confirmed. The sleeve cap is $${SLEEVE_CAP}. Robinhood is not used.`;
+}
+
+async function coinMarketCaps(symbols: string[]): Promise<Map<string, number>> {
+  const found = new Map<string, number>();
+  const query = [...new Set(symbols.map((symbol) => symbol.split("/")[0].toLowerCase()).filter(Boolean))];
+  if (query.length === 0) return found;
+  try {
+    const body = await fetchText(
+      `https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&symbols=${encodeURIComponent(query.join(","))}&per_page=250`,
+    );
+    const rows = JSON.parse(body) as Array<{ symbol?: string; market_cap?: number }>;
+    for (const row of rows) {
+      if (row.symbol && typeof row.market_cap === "number" && Number.isFinite(row.market_cap)) {
+        found.set(row.symbol.toLowerCase(), row.market_cap);
+      }
+    }
+  } catch {
+    return found;
+  }
+  return found;
+}
+
+function factsFrom(
+  symbol: string,
+  action: DeskFacts["action"],
+  technical: TechnicalReport,
+  fundamental: FundamentalReport | null,
+  marketCap: number | null,
+  order: PlannedOrder | null,
+  skip: string | null,
+): DeskFacts {
+  return {
+    symbol,
+    action,
+    technical: {
+      asOf: technical.asOf,
+      lastClose: technical.lastClose,
+      sma20: technical.sma20,
+      sma50: technical.sma50,
+      rsi14: technical.rsi14,
+      trend: technical.trend,
+    },
+    fundamental: fundamental
+      ? {
+          source: fundamental.status === "ok" ? "sec-edgar-companyfacts" : "unavailable",
+          netIncome: fundamental.status === "ok" ? fundamental.netIncome : null,
+          revenueGrowth: fundamental.status === "ok" ? fundamental.revenueGrowth : null,
+          trailingPe: fundamental.status === "ok" ? fundamental.trailingPe : null,
+          marketCap: null,
+        }
+      : {
+          source: marketCap != null ? "coingecko" : "unavailable",
+          netIncome: null,
+          revenueGrowth: null,
+          trailingPe: null,
+          marketCap,
+        },
+    orderLine: orderLine(order, skip),
+  };
+}
+
+async function analyzeOwned(input: {
+  position: AlpacaPosition;
+  asset: AlpacaAsset | null;
+  tickers: Awaited<ReturnType<typeof loadTickerMap>>;
+  marketCap: number | null;
+  sleeveCost: number;
+  sleeveQty: number;
+  budget: number;
+}): Promise<Recommendation | null> {
+  const symbol = input.position.orderSymbol;
+  const bars = await pullDailyBars(symbol);
+  const technical = buildTechnicalReport(symbol, bars);
+  let decision: Decision;
+  let fundamental: FundamentalReport | null = null;
+  if (input.position.assetClass === "crypto") {
+    decision = decideCrypto(technical);
+  } else {
+    fundamental = await pullFundamentals(symbol, technical.lastClose, input.tickers);
+    decision = decide(technical, fundamental, writeResearch(technical, fundamental));
+  }
+  const managed = managePosition(decision);
+  if (managed.action === "hold") return null;
+  const price = technical.lastClose;
+  const fractionable = input.asset?.fractionable === true;
+  const review: SleeveReview = {
+    symbol,
+    assetClass: input.position.assetClass,
+    owned: true,
+    qty: input.position.qty,
+    costBasis: input.sleeveCost,
+    action: managed.action,
+    why: managed.why.join(" "),
+    price,
+    markAsOf: technical.asOf,
+    fractionable,
+    minOrderSize: input.asset?.minOrderSize ?? null,
+    minTradeIncrement: input.asset?.minTradeIncrement ?? null,
+  };
+  let order: PlannedOrder | null = null;
+  let skip: string | null = null;
+  if (managed.action === "sell") {
+    if (price == null || !(input.position.qty > 0)) skip = "Sell signal, but there is no completed price, so no order was sized.";
+    else {
+      order = {
+        symbol,
+        assetClass: input.position.assetClass,
+        side: "sell",
+        qty: input.position.qty.toFixed(9).replace(/\.?0+$/, ""),
+        notional: null,
+        timeInForce: input.position.assetClass === "crypto" ? "gtc" : "day",
+        reason: "",
+        estimatedQty: input.position.qty,
+        estimatedPrice: price,
+        estimatedNotional: Math.round(input.position.qty * price * 100) / 100,
+      };
+    }
+  } else {
+    const planned = planSleeve(
+      { ...emptyOwnedSleeve(input.budget), positions: input.sleeveQty > 0 ? [{
+        symbol,
+        assetClass: input.position.assetClass,
+        qty: input.sleeveQty,
+        avgCost: input.sleeveQty > 0 ? input.sleeveCost / input.sleeveQty : 0,
+        costBasis: input.sleeveCost,
+        markPrice: price ?? 0,
+        lastAction: null,
+        lastWhy: "",
+        lastCheckedAt: null,
+        markAsOf: null,
+      }] : [] },
+      [review],
+    );
+    order = planned.buys[0] ?? null;
+    skip = planned.notes.find((note) => note.symbol === symbol)?.why ?? null;
+  }
+  const written = deskReason(factsFrom(symbol, managed.action, technical, fundamental, input.marketCap, order, skip));
+  if (order) order.reason = written.reason;
+  const confirmable = written.confirmable && order != null;
+  return {
+    id: randomUUID(),
+    symbol,
+    name: symbol,
+    assetClass: input.position.assetClass,
+    action: managed.action,
+    reason: written.reason,
+    confirmable,
+    blocker: confirmable ? null : (skip ?? "Not confirmable until both a technical figure and a fundamental figure are present."),
+    order: confirmable ? order : null,
+    status: "recommendation",
+    alpacaOrderId: null,
+  };
+}
+
+function emptyOwnedSleeve(cash: number): SleeveFile {
+  return {
+    broker: "alpaca-paper" as const,
+    cap: SLEEVE_CAP,
+    cash,
+    positions: [],
+    notes: [],
+    orders: [],
+    alpacaEquity: null,
+    alpacaCash: null,
+    alpacaBuyingPower: null,
+    updatedAt: null,
+  };
+}
+
+export async function runDesk(env: NodeJS.ProcessEnv = process.env): Promise<DeskReport> {
+  const creds = paperCredentials(env);
+  const sleeve = await loadSleeve();
+  if (!creds.ok) {
+    const report = emptyReport({
+      configured: false,
+      unset: creds.unset,
+      blocker: creds.blocker,
+      sleeveCash: sleeve.cash,
+      buyingPowerUsed: Math.min(SLEEVE_CAP, openCost(sleeve)),
+      generatedAt: new Date().toISOString(),
+    });
+    await writeStore({ recommendations: [], report });
+    return report;
+  }
+  const alpaca = createAlpacaPaper(env);
+  const account = await alpaca.account();
+  const positions = await alpaca.positions();
+  sleeve.alpacaEquity = account.equity;
+  sleeve.alpacaCash = account.cash;
+  sleeve.alpacaBuyingPower = account.buyingPower;
+  sleeve.updatedAt = new Date().toISOString();
+  await saveSleeve(sleeve);
+  const tickers = await loadTickerMap();
+  const cryptoSymbols = positions.filter((position) => position.assetClass === "crypto").map((position) => position.orderSymbol);
+  const caps = await coinMarketCaps(cryptoSymbols);
+  const recommendations: Recommendation[] = [];
+  const budget = spendable(sleeve.cash, openCost(sleeve));
+  for (const position of positions) {
+    const asset = await alpaca.asset(position.orderSymbol);
+    const held = sleeve.positions.find((item) => item.symbol === position.orderSymbol);
+    const marketCap = caps.get(position.orderSymbol.split("/")[0].toLowerCase()) ?? null;
+    const recommendation = await analyzeOwned({
+      position,
+      asset,
+      tickers,
+      marketCap,
+      sleeveCost: held?.costBasis ?? 0,
+      sleeveQty: held?.qty ?? 0,
+      budget,
+    });
+    if (recommendation) recommendations.push(recommendation);
+  }
+  const owned = new Set(positions.map((position) => position.orderSymbol));
+  const universe = await scanUniverse();
+  let stockTries = 0;
+  for (const hit of universe.ranked) {
+    if (stockTries >= STOCK_TRIES) break;
+    if (owned.has(hit.symbol) || hit.lastSale <= 0) continue;
+    stockTries += 1;
+    const recommendation = await analyzeNew({
+      symbol: hit.symbol,
+      name: hit.name,
+      assetClass: "us_equity",
+      tickers,
+      marketCap: null,
+      asset: await alpaca.asset(hit.symbol),
+      budget,
+    });
+    if (recommendation) recommendations.push(recommendation);
+  }
+  const pairs = await alpaca.cryptoUsdPairs();
+  const pairCaps = await coinMarketCaps(pairs.map((pair) => pair.symbol));
+  const rankedPairs = pairs
+    .filter((pair) => !owned.has(pair.symbol))
+    .sort((a, b) => (pairCaps.get(b.symbol.split("/")[0].toLowerCase()) ?? 0) - (pairCaps.get(a.symbol.split("/")[0].toLowerCase()) ?? 0));
+  let cryptoTries = 0;
+  for (const pair of rankedPairs) {
+    if (cryptoTries >= CRYPTO_TRIES) break;
+    cryptoTries += 1;
+    const recommendation = await analyzeNew({
+      symbol: pair.symbol,
+      name: pair.symbol,
+      assetClass: "crypto",
+      tickers,
+      marketCap: pairCaps.get(pair.symbol.split("/")[0].toLowerCase()) ?? null,
+      asset: pair,
+      budget,
+    });
+    if (recommendation) recommendations.push(recommendation);
+  }
+  const report = emptyReport({
+    generatedAt: new Date().toISOString(),
+    configured: true,
+    cap: SLEEVE_CAP,
+    alpacaEquity: account.equity,
+    alpacaBuyingPower: account.buyingPower,
+    sleeveCash: sleeve.cash,
+    buyingPowerUsed: Math.min(SLEEVE_CAP, openCost(sleeve)),
+    portfolio: positions.map((position) => ({
+      symbol: position.orderSymbol,
+      qty: position.qty,
+      marketValue: position.marketValue,
+      assetClass: position.assetClass,
+    })),
+    recommendations,
+    blocker: null,
+  });
+  await writeStore({ recommendations, report });
+  return report;
+}
+
+async function analyzeNew(input: {
+  symbol: string;
+  name: string;
+  assetClass: "us_equity" | "crypto";
+  tickers: Awaited<ReturnType<typeof loadTickerMap>>;
+  marketCap: number | null;
+  asset: AlpacaAsset | null;
+  budget: number;
+}): Promise<Recommendation | null> {
+  let technical: TechnicalReport;
+  try {
+    technical = buildTechnicalReport(input.symbol, await pullDailyBars(input.symbol));
+  } catch {
+    return null;
+  }
+  let decision: Decision;
+  let fundamental: FundamentalReport | null = null;
+  if (input.assetClass === "crypto") decision = decideCrypto(technical);
+  else {
+    fundamental = await pullFundamentals(input.symbol, technical.lastClose, input.tickers);
+    decision = decide(technical, fundamental, writeResearch(technical, fundamental));
+  }
+  if (decision.action !== "buy") return null;
+  const review: SleeveReview = {
+    symbol: input.symbol,
+    assetClass: input.assetClass,
+    owned: false,
+    qty: 0,
+    costBasis: 0,
+    action: "buy",
+    why: decision.why.join(" "),
+    price: technical.lastClose,
+    markAsOf: technical.asOf,
+    fractionable: input.asset?.fractionable === true,
+    minOrderSize: input.asset?.minOrderSize ?? null,
+    minTradeIncrement: input.asset?.minTradeIncrement ?? null,
+  };
+  const planned = planSleeve(emptyOwnedSleeve(input.budget), [review]);
+  const order = planned.buys[0] ?? null;
+  const skip = planned.notes.find((note) => note.symbol === input.symbol)?.why ?? (order ? null : CASH_SKIP);
+  const written = deskReason(factsFrom(input.symbol, "buy", technical, fundamental, input.marketCap, order, skip));
+  if (order) order.reason = written.reason;
+  const confirmable = written.confirmable && order != null;
+  return {
+    id: randomUUID(),
+    symbol: input.symbol,
+    name: input.name,
+    assetClass: input.assetClass,
+    action: "buy",
+    reason: written.reason,
+    confirmable,
+    blocker: confirmable ? null : (skip ?? "Not confirmable until both a technical figure and a fundamental figure are present."),
+    order: confirmable ? order : null,
+    status: "recommendation",
+    alpacaOrderId: null,
+  };
+}
+
+export async function confirmRecommendation(
+  id: string,
+  env: NodeJS.ProcessEnv = process.env,
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ accepted: boolean; unset: string[]; blocker: string | null; recommendation: Recommendation | null }> {
+  const creds = paperCredentials(env);
+  let store: Store;
+  try {
+    store = JSON.parse(await readFile(recommendationsPath, "utf8")) as Store;
+  } catch {
+    return { accepted: false, unset: creds.ok ? [] : creds.unset, blocker: "No scan is loaded. Run Scan portfolio first.", recommendation: null };
+  }
+  const recommendation = store.recommendations.find((item) => item.id === id) ?? null;
+  if (!recommendation) {
+    return { accepted: false, unset: creds.ok ? [] : creds.unset, blocker: "That recommendation is not on the board.", recommendation: null };
+  }
+  if (recommendation.status !== "recommendation") {
+    return { accepted: false, unset: creds.ok ? [] : creds.unset, blocker: "That order was already confirmed or rejected.", recommendation };
+  }
+  if (!recommendation.confirmable || !recommendation.order) {
+    return {
+      accepted: false,
+      unset: creds.ok ? [] : creds.unset,
+      blocker: recommendation.blocker ?? "This idea stays a recommendation.",
+      recommendation,
+    };
+  }
+  if (!creds.ok) {
+    return { accepted: false, unset: creds.unset, blocker: creds.blocker, recommendation };
+  }
+  const sleeve = await loadSleeve();
+  if (recommendation.order.side === "buy") {
+    const room = spendable(sleeve.cash, openCost(sleeve));
+    if (recommendation.order.estimatedNotional > room) {
+      return { accepted: false, unset: [], blocker: CASH_SKIP, recommendation };
+    }
+  }
+  const result = await submitPaperOrder(orderRequest(recommendation.order, recommendation.id), env, fetchImpl);
+  if (!result.accepted) {
+    recommendation.status = "rejected";
+    recommendation.blocker = result.blocker;
+    await writeStore(store);
+    return { accepted: false, unset: [], blocker: result.blocker, recommendation };
+  }
+  const qty = result.filledQty ?? recommendation.order.estimatedQty;
+  const price = result.filledAvgPrice ?? recommendation.order.estimatedPrice;
+  const next = applyAcceptedOrder(sleeve, recommendation.order, {
+    qty,
+    price,
+    at: new Date().toISOString(),
+    id: result.id,
+    status: result.status,
+  });
+  await saveSleeve(next);
+  recommendation.status = "confirmed";
+  recommendation.alpacaOrderId = result.id;
+  recommendation.blocker = null;
+  store.report.sleeveCash = next.cash;
+  store.report.buyingPowerUsed = Math.min(SLEEVE_CAP, openCost(next));
+  store.report.recommendations = store.recommendations;
+  await writeStore(store);
+  return { accepted: true, unset: [], blocker: null, recommendation };
+}

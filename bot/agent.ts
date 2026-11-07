@@ -2,7 +2,7 @@ import { defineAgent } from "@grok/agent-sdk";
 
 export default defineAgent({
   name: "MyTradingIQ",
-  description: "Scan the US market, analyze the names that surface, and apply paper decisions. Live orders stay blocked.",
+  description: "Scan on request, recommend with technicals and fundamentals, and send one confirmed order to Alpaca paper. Live and Robinhood orders stay blocked.",
   model: {
     id: "grok-4.7",
     params: [
@@ -20,6 +20,8 @@ export default defineAgent({
       "agent.robinhood.com",
       "robinhood.com",
       "api.robinhood.com",
+      "paper-api.alpaca.markets",
+      "api.coingecko.com",
     ],
   },
 });

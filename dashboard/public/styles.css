@@ -62,6 +62,15 @@ button {
 
 button:disabled { opacity: 0.6; cursor: wait; }
 
+button.confirm {
+  background: transparent;
+  color: var(--ink);
+  border: 1px solid var(--ink);
+  padding: 6px 10px;
+}
+
+.add { color: var(--buy); font-weight: 700; }
+
 .badge {
   border: 1px solid var(--stamp);
   color: var(--stamp);

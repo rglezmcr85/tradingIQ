@@ -22,188 +22,118 @@ function num(value, digits = 2) {
   return Number(value).toLocaleString("en-US", { maximumFractionDigits: digits, minimumFractionDigits: digits });
 }
 
-function compact(value) {
-  if (value == null) return "—";
-  return Number(value).toLocaleString("en-US", { notation: "compact", maximumFractionDigits: 1 });
-}
-
-function pct(value) {
-  if (value == null) return "—";
-  return `${(Number(value) * 100).toFixed(1)}%`;
-}
-
 function actionClass(action) {
-  if (action === "buy" || action === "sell" || action === "hold") return action;
+  if (action === "buy" || action === "sell" || action === "add") return action;
   return "";
 }
 
-function spark(closes) {
-  if (!closes || closes.length < 2) return "";
-  const min = Math.min(...closes);
-  const max = Math.max(...closes);
-  const span = max - min || 1;
-  const points = closes
-    .map((close, index) => {
-      const x = (index / (closes.length - 1)) * 140;
-      const y = 40 - ((close - min) / span) * 36;
-      return `${x.toFixed(1)},${y.toFixed(1)}`;
-    })
-    .join(" ");
-  return `<svg class="spark" viewBox="0 0 140 42"><polyline fill="none" stroke="#1c1915" stroke-width="2" points="${points}" /></svg>`;
+function orderLabel(recommendation) {
+  const order = recommendation.order;
+  if (!order) return "Not sized";
+  if (order.notional != null) return `${order.side} $${order.notional}`;
+  return `${order.side} ${order.qty}`;
 }
 
-function renderStats(scan) {
-  if (!scan) {
-    statsEl.innerHTML = `<div class="card"><div class="label">Universe</div><div class="stat">No scan yet</div></div>`;
-    return;
+function render() {
+  const desk = state?.desk ?? null;
+  const lede = document.querySelector("#lede");
+  if (lede) {
+    lede.textContent = desk?.configured
+      ? "Scan portfolio reads Alpaca paper and writes recommendations. Confirm sends only that one paper order, inside the $15,000 sleeve."
+      : "Scan portfolio is manual. Alpaca paper keys are required to load the account. No order is sent by the scan.";
   }
-  const u = scan.universe;
+  badge.textContent = "Robinhood blocked";
   const items = [
-    ["Listed names", u.listedCommonStocks.toLocaleString("en-US")],
-    ["Screener rows", u.screenerRows.toLocaleString("en-US")],
-    ["Passed screen", u.passedScreen.toLocaleString("en-US")],
-    ["Analyzed", String(u.analyzed.length)],
-    ["Paper equity", `$${num(state.paper.equity)}`],
+    ["Sleeve cap", `$${num(desk?.cap ?? 15000, 0)}`],
+    ["Sleeve cash", `$${num(desk?.sleeveCash ?? 15000)}`],
+    ["Sleeve used", `$${num(desk?.buyingPowerUsed ?? 0)}`],
+    ["Alpaca equity", desk?.alpacaEquity == null ? "—" : `$${num(desk.alpacaEquity)}`],
+    ["Ideas", String(desk?.recommendations?.length ?? 0)],
   ];
   statsEl.innerHTML = items
     .map(([label, value]) => `<div class="card"><div class="label">${esc(label)}</div><div class="stat">${esc(value)}</div></div>`)
     .join("");
-}
 
-function renderTable(scan) {
-  if (!scan) {
-    tableEl.innerHTML = `<p class="muted">Run a scan to pull prices and filings. Nothing is filled in ahead of time.</p>`;
-    return;
-  }
-  const rows = scan.analyses
-    .map((row) => {
-      const active = row.symbol === selected ? "active" : "";
-      return `<tr class="${active}" data-symbol="${esc(row.symbol)}">
-        <td><strong>${esc(row.symbol)}</strong><div class="muted">${esc(row.name)}</div></td>
-        <td class="${actionClass(row.decision.action)}">${esc(row.decision.action)}</td>
-        <td>${esc(row.decision.bias)}</td>
-        <td>${num(row.technical.lastClose)}</td>
-        <td>${num(row.technical.rsi14, 1)}</td>
-        <td>${num(row.fundamental.trailingPe, 1)}</td>
-        <td>${esc(row.book.bookAction)}</td>
-      </tr>`;
-    })
-    .join("");
-  tableEl.innerHTML = `<table>
-    <thead><tr><th>Name</th><th>Action</th><th>Bias</th><th>Close</th><th>RSI</th><th>P/E</th><th>Book</th></tr></thead>
-    <tbody>${rows}</tbody>
-  </table>`;
-  for (const tr of tableEl.querySelectorAll("tr[data-symbol]")) {
-    tr.addEventListener("click", () => {
-      selected = tr.dataset.symbol;
-      render();
-    });
-  }
-}
-
-function renderDetail(scan) {
-  const row = scan?.analyses.find((item) => item.symbol === selected);
-  if (!row) {
-    detailEl.innerHTML = `<p class="muted">Select a symbol.</p>`;
-    return;
-  }
-  const t = row.technical;
-  const f = row.fundamental;
-  const why = row.decision.why.map((line) => `<li>${esc(line)}</li>`).join("");
-  const bull = row.research.bullCase.map((line) => `<li>${esc(line)}</li>`).join("") || "<li>None from the pulled facts.</li>";
-  const bear = row.research.bearCase.map((line) => `<li>${esc(line)}</li>`).join("") || "<li>None from the pulled facts.</li>";
-  detailEl.innerHTML = `
-    <div class="kicker">${esc(row.origin)}</div>
-    <h2>${esc(row.symbol)} <span class="${actionClass(row.decision.action)}">${esc(row.decision.action)}</span></h2>
-    <p>${esc(row.name)} · bias ${esc(row.decision.bias)} · research ${esc(row.research.stance)}</p>
-    ${spark(t.closes)}
-    <div class="grid2">
-      <div>
-        <div class="label">Technicals · Yahoo daily</div>
-        <p>Close ${num(t.lastClose)} on ${esc(t.asOf)} · ${t.barCount} bars</p>
-        <p>SMA20 ${num(t.sma20)} · SMA50 ${num(t.sma50)} · RSI14 ${num(t.rsi14, 1)}</p>
-        <p>Trend ${esc(t.trend)} · screen quote ${num(row.screenLastSale)} used only to rank</p>
-      </div>
-      <div>
-        <div class="label">Fundamentals · ${esc(f.source)}</div>
-        ${
-          f.status === "ok"
-            ? `<p>${esc(f.companyName)} · CIK ${esc(f.cik)}</p>
-        <p>Year ending ${esc(f.periodEnd)} · revenue ${compact(f.revenue)} · growth ${pct(f.revenueGrowth)}</p>
-        <p>Net income ${compact(f.netIncome)} · EPS ${num(f.dilutedEps)} · P/E ${num(f.trailingPe, 1)} · margin ${pct(f.netMargin)}</p>
-        <p class="muted">Accession ${esc(f.accession)} · filed ${esc(f.filed)}</p>`
-            : `<p>${esc(f.unavailableReason || "SEC company facts were not available. No figure was filled in.")}</p>`
+  const recommendations = desk?.recommendations ?? [];
+  if (!selected && recommendations[0]) selected = recommendations[0].id;
+  if (!recommendations.length) {
+    const blocker = desk?.blocker ? `<p>${esc(desk.blocker)}</p>` : "";
+    const unset = desk?.unset?.length ? `<p>Unset: ${esc(desk.unset.join(", "))}</p>` : "";
+    tableEl.innerHTML = `${blocker}${unset}<p class="muted">No recommendations yet. Scan portfolio does not send an order.</p>`;
+  } else {
+    const rows = recommendations
+      .map((row) => {
+        const active = row.id === selected ? "active" : "";
+        const confirm = row.confirmable && row.status === "recommendation"
+          ? `<button class="confirm" type="button" data-confirm="${esc(row.id)}">Confirm this order</button>`
+          : `<span class="muted">${esc(row.status === "confirmed" ? "Confirmed" : row.status === "rejected" ? "Not accepted" : "Not confirmable")}</span>`;
+        return `<tr class="${active}" data-id="${esc(row.id)}">
+          <td><strong>${esc(row.symbol)}</strong><div class="muted">${esc(row.assetClass)}</div></td>
+          <td class="${actionClass(row.action)}">${esc(row.action)}</td>
+          <td>${esc(orderLabel(row))}</td>
+          <td>${confirm}</td>
+        </tr>`;
+      })
+      .join("");
+    tableEl.innerHTML = `<table>
+      <thead><tr><th>Name</th><th>Idea</th><th>Order</th><th></th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+    for (const tr of tableEl.querySelectorAll("tr[data-id]")) {
+      tr.addEventListener("click", () => {
+        selected = tr.dataset.id;
+        render();
+      });
+    }
+    for (const confirmButton of tableEl.querySelectorAll("button[data-confirm]")) {
+      confirmButton.addEventListener("click", async (event) => {
+        event.stopPropagation();
+        confirmButton.disabled = true;
+        confirmButton.textContent = "Sending";
+        try {
+          await load("/api/confirm", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ id: confirmButton.dataset.confirm }),
+          });
+        } catch (err) {
+          detailEl.innerHTML = `<p class="sell">${esc(err.message)}</p>`;
         }
-      </div>
-    </div>
-    <div class="grid2">
-      <div><div class="label">Bull case</div><ul class="notes">${bull}</ul></div>
-      <div><div class="label">Bear case</div><ul class="notes">${bear}</ul></div>
-    </div>
-    <div class="label">Why</div>
-    <ul class="notes">${why}</ul>
-    <p><strong>Paper:</strong> ${esc(row.book.bookWhy)}</p>
-  `;
-}
+      });
+    }
+  }
 
-function renderBook(paper) {
-  const positions = paper.positions.length
-    ? paper.positions
+  const chosen = recommendations.find((row) => row.id === selected);
+  if (!chosen) {
+    detailEl.innerHTML = `<p class="muted">Select a recommendation. The reason has to include technicals and fundamentals. Unconfirmed ideas are not orders.</p>`;
+  } else {
+    detailEl.innerHTML = `
+      <div class="kicker">${esc(chosen.status)}</div>
+      <h2>${esc(chosen.symbol)} <span class="${actionClass(chosen.action)}">${esc(chosen.action)}</span></h2>
+      <p>${esc(chosen.reason)}</p>
+      ${chosen.blocker ? `<p class="sell">${esc(chosen.blocker)}</p>` : ""}
+    `;
+  }
+
+  const portfolio = desk?.portfolio ?? [];
+  const lines = portfolio.length
+    ? portfolio
         .map(
           (position) =>
-            `<tr><td>${esc(position.symbol)}</td><td>${esc(position.shares)}</td><td>${num(position.avgCost)}</td><td>${num(position.markPrice)}</td><td>${num(position.unrealizedPnl)}</td></tr>`,
+            `<tr><td>${esc(position.symbol)}</td><td>${esc(position.assetClass)}</td><td>${esc(position.qty)}</td><td>${num(position.marketValue)}</td></tr>`,
         )
         .join("")
-    : `<tr><td colspan="5">No open paper positions.</td></tr>`;
-  const trades = paper.trades.length
-    ? paper.trades
-        .slice(-8)
-        .reverse()
-        .map(
-          (trade) =>
-            `<tr><td>${esc(trade.filledAt?.slice(0, 16))}</td><td>${esc(trade.side)}</td><td>${esc(trade.symbol)}</td><td>${esc(trade.shares)}</td><td>${num(trade.fillPrice)}</td><td>${num(trade.realizedPnl)}</td></tr>`,
-        )
-        .join("")
-    : `<tr><td colspan="6">No paper fills yet.</td></tr>`;
+    : `<tr><td colspan="4">No Alpaca paper portfolio loaded.</td></tr>`;
   bookEl.innerHTML = `
-    <div class="stats">
-      <div><div class="label">Cash</div><div class="stat">$${num(paper.cash)}</div></div>
-      <div><div class="label">Equity</div><div class="stat">$${num(paper.equity)}</div></div>
-      <div><div class="label">Unrealized</div><div class="stat">$${num(paper.unrealizedPnl)}</div></div>
-      <div><div class="label">Realized</div><div class="stat">$${num(paper.realizedPnl)}</div></div>
-      <div><div class="label">Total P&L</div><div class="stat">$${num(paper.totalPnl)}</div></div>
-    </div>
+    <p class="muted">Alpaca equity is the full paper account. Orders from this desk can use at most $${num(desk?.cap ?? 15000, 0)} of buying power. That sleeve is tracked separately.</p>
     <table>
-      <thead><tr><th>Position</th><th>Shares</th><th>Avg cost</th><th>Mark</th><th>Unrealized</th></tr></thead>
-      <tbody>${positions}</tbody>
-    </table>
-    <h2>Recent fills</h2>
-    <table>
-      <thead><tr><th>When</th><th>Side</th><th>Symbol</th><th>Shares</th><th>Fill</th><th>Realized</th></tr></thead>
-      <tbody>${trades}</tbody>
+      <thead><tr><th>Portfolio</th><th>Class</th><th>Qty</th><th>Market value</th></tr></thead>
+      <tbody>${lines}</tbody>
     </table>
   `;
-}
-
-function render() {
-  const scan = state?.scan ?? null;
-  if (scan && !selected) selected = scan.analyses[0]?.symbol ?? null;
-  const lede = document.querySelector("#lede");
-  const week = state?.week;
-  if (lede) {
-    lede.textContent = week?.active
-      ? `$50 paper week through ${week.week.endsAt.slice(0, 16)} UTC. Scan daily at 21:30 UTC. Live orders stay blocked.`
-      : "US-listed scan for a $50 paper book. One whole share only when the price fits in the remaining cash.";
-  }
-  badge.textContent = state?.live?.submission === "blocked" ? "Live orders blocked" : "Live path";
-  renderStats(scan);
-  renderTable(scan);
-  renderDetail(scan);
-  renderBook(state.paper);
-  const u = scan?.universe;
-  footerEl.textContent = u
-    ? `Universe: Nasdaq Trader symbol directories, ${u.listedCommonStocks.toLocaleString("en-US")} common stocks after ETF and test-issue filters. Nasdaq screener returned ${u.screenerRows.toLocaleString("en-US")} rows; ${u.passedScreen.toLocaleString("en-US")} passed price, volume, and market-cap filters. ${Number(u.affordableNames ?? 0).toLocaleString("en-US")} of those have a screen price at or under $${Number(u.priceCeiling ?? 50)}. Deep analysis: ${u.analyzed.join(", ") || "none"}. A buy is one whole share when it fits in remaining cash. Prices: Yahoo daily chart. Fundamentals: SEC EDGAR company facts.`
-    : "No scan file yet. The desk does not ship a watchlist.";
+  footerEl.textContent = desk?.blocker
+    ? desk.blocker
+    : "Technicals are Yahoo daily bars, not a tick stream. Stock fundamentals are SEC company facts. Crypto fundamentals are CoinGecko market cap. Crypto is on. Live Robinhood orders are not sent. Alpaca live trading is not used.";
 }
 
 async function load(path, options) {
@@ -223,7 +153,7 @@ button.addEventListener("click", async () => {
     detailEl.innerHTML = `<p class="sell">${esc(err.message)}</p>`;
   } finally {
     button.disabled = false;
-    button.textContent = "Run scan";
+    button.textContent = "Scan portfolio";
   }
 });
 

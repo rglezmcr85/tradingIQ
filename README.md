@@ -13,7 +13,7 @@ npm run week
 npm run dashboard
 ```
 
-`npm run week` starts a 7-day paper run at $50. It scans once immediately, then every day at 21:30 UTC until the week ends. Open http://127.0.0.1:4173 while that process is running.
+Open the dashboard with `npm run dashboard` at http://127.0.0.1:4173. Press **Scan portfolio**. That loads the Alpaca paper account and lists recommendations. Press **Confirm this order** on one row to send that order only. The scan does not send an order. The clock does not send an order.
 
 ## Desk
 
@@ -28,6 +28,6 @@ Market scan, technical analyst, fundamental analyst, bull and bear note, trader 
 
 ## Paper and live
 
-The one-week paper account starts at $50. A new long is one whole share when that price fits in the remaining cash. A name is skipped when one share costs more than the remaining cash. There are no fractional shares. Fills use the last daily close. At most five names.
+Confirmed orders use Alpaca paper only, inside a $15,000 sleeve tracked separately from the full paper equity. Crypto is on. A name is skipped when one unit costs more than the remaining sleeve cash. Fractional size is used only when that Alpaca paper asset says it is fractionable. `ALPACA_PAPER_TRADE` stays at its default true.
 
 Robinhood: `https://agent.robinhood.com/mcp/trading` (Streamable HTTP, OAuth 2.1 PKCE, public client). After you want the live path, run `npx @grok/agent-sdk mcp oauth robinhood` and approve it in the browser. Orders stay off until that connection exists and `MYTRADINGIQ_LIVE_ORDERS=confirm`. This build does not submit an order. Reads can span accounts. Any later order stays on the Agentic account and is a long equity or a long option.
