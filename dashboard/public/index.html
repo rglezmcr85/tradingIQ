@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MyTradingIQ</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header>
+      <div class="brand">
+        <div class="kicker">Paper desk</div>
+        <h1>MyTradingIQ</h1>
+        <p class="lede" id="lede">US-listed scan, then technicals and SEC fundamentals only on the names that surface.</p>
+      </div>
+      <div class="controls">
+        <span class="badge" id="live-badge">Live orders blocked</span>
+        <button id="scan-button" type="button">Run scan</button>
+      </div>
+    </header>
+    <main>
+      <section class="stats" id="stats"></section>
+      <section class="split">
+        <div class="card">
+          <h2>Scan</h2>
+          <div id="scan-table"></div>
+        </div>
+        <div class="card">
+          <h2>Analysis</h2>
+          <div id="detail">Select a symbol.</div>
+        </div>
+      </section>
+      <section class="card book">
+        <h2>Paper book</h2>
+        <div id="book"></div>
+      </section>
+    </main>
+    <footer id="footer"></footer>
+    <script src="/app.js"></script>
+  </body>
+</html>

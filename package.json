@@ -1,0 +1,21 @@
+{
+  "name": "mytradingiq",
+  "private": true,
+  "type": "module",
+  "description": "US market scan, SEC and price analysis, and a capped paper book.",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "selfcheck": "tsx bot/lib/selfcheck.ts",
+    "scan": "tsx dashboard/scan-cli.ts",
+    "dashboard": "tsx dashboard/server.ts",
+    "dev": "agent-sdk dev"
+  },
+  "dependencies": {
+    "@grok/agent-sdk": "^0.6.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.0",
+    "typescript": "6.0.3"
+  }
+}
