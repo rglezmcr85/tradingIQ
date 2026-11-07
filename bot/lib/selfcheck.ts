@@ -224,4 +224,14 @@ assert.match(held.blocker ?? "", /ALPACA_API_KEY/);
 if (previous) await writeFile(recommendationsPath, previous);
 else await rm(recommendationsPath, { force: true });
 
+const { dashboardHtml, handleRequest } = await import("../../dashboard/handler");
+const pageFile = await readFile(new URL("../../public/index.html", import.meta.url), "utf8");
+assert.equal(dashboardHtml, pageFile);
+const rootPage = await handleRequest(new Request("https://tradingiq.vercel.app/"));
+const indexPage = await handleRequest(new Request("https://tradingiq.vercel.app/index.html"));
+assert.equal(rootPage.status, 200);
+assert.equal(rootPage.headers.get("content-type"), "text/html; charset=utf-8");
+assert.equal(await rootPage.text(), await indexPage.text());
+assert.match(pageFile, /Scan portfolio/);
+
 console.log("selfcheck ok");

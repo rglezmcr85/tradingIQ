@@ -2,9 +2,11 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": "node",
   "buildCommand": null,
+  "rewrites": [{ "source": "/", "destination": "/index.html" }],
   "functions": {
     "server.ts": {
-      "maxDuration": 60
+      "maxDuration": 60,
+      "includeFiles": "public/**"
     }
   }
 }
