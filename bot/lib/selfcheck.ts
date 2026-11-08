@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { decide, technicalBuyReady } from "./decision";
 import { selectNewHits } from "./desk";
+import { MODEL_BUY_CAP, RANK_MODEL, rankPassed, type RankFigures, type RankRow } from "./rank";
 import { reviewLiveOrder } from "./live-gate";
 import { nextCloseRun } from "./week";
 import { applyDecisions, emptyBook, markBook } from "./paper";
@@ -241,5 +242,165 @@ assert.equal(rootPage.status, 200);
 assert.equal(rootPage.headers.get("content-type"), "text/html; charset=utf-8");
 assert.equal(await rootPage.text(), await indexPage.text());
 assert.match(pageFile, /Scan portfolio/);
+const appJs = await readFile(new URL("../../public/app.js", import.meta.url), "utf8");
+assert.match(appJs, /modelNote/);
+
+const rankFigures: RankFigures = {
+  asOf: "2026-11-06",
+  trend: "up",
+  lastClose: 36.63,
+  sma20: 35,
+  sma50: 33,
+  rsi14: 52,
+  netIncome: 100,
+  revenueGrowth: 0.08,
+  trailingPe: 20,
+  marketCap: null,
+  qty: 1,
+  notional: 36.63,
+};
+
+function rankRow(id: string, action: RankRow["action"], scope: RankRow["scope"]): RankRow {
+  const reason = `${action} ${id}. Rules passed.`;
+  return {
+    id,
+    symbol: id,
+    action,
+    scope,
+    confirmable: true,
+    reason,
+    order: { reason },
+  };
+}
+
+function containsSecret(value: unknown, secret: string): boolean {
+  return JSON.stringify(value).includes(secret);
+}
+
+const rankSecret = "sk-test-rank-key-not-for-logs";
+let rankCalled = false;
+const unsetRank = await rankPassed(
+  [{ row: rankRow("BUY1", "buy", "new"), figures: rankFigures }],
+  { OPENAI_API_KEY: "   " },
+  async () => {
+    rankCalled = true;
+    return new Response("{}", { status: 200 });
+  },
+);
+assert.equal(rankCalled, false);
+assert.equal(unsetRank.model, "off");
+assert.match(unsetRank.modelNote, /OPENAI_API_KEY is unset/);
+assert.match(unsetRank.modelNote, /rules only/);
+assert.equal(unsetRank.rows.length, 1);
+assert.equal(unsetRank.rows[0]?.reason, "buy BUY1. Rules passed.");
+
+const quiet = { log: console.log, error: console.error, warn: console.warn, info: console.info, debug: console.debug };
+const rankLogs: string[] = [];
+console.log = (...args: unknown[]) => {
+  rankLogs.push(args.map((item) => String(item)).join(" "));
+};
+console.error = console.log;
+console.warn = console.log;
+console.info = console.log;
+console.debug = console.log;
+
+const keptSentence = "Close 36.63 is above SMA20 35 with RSI14 52.";
+let rankRaw = "";
+let rankAuthOk = false;
+const ranked = await rankPassed(
+  [
+    { row: rankRow("SELL1", "sell", "owned"), figures: rankFigures },
+    { row: rankRow("ADD1", "add", "owned"), figures: rankFigures },
+    { row: rankRow("BUY1", "buy", "new"), figures: rankFigures },
+    { row: rankRow("BUY2", "buy", "new"), figures: rankFigures },
+    ...Array.from({ length: MODEL_BUY_CAP }, (_, index) => ({
+      row: rankRow(`EXTRA${index}`, "buy", "new"),
+      figures: rankFigures,
+    })),
+  ],
+  { OPENAI_API_KEY: rankSecret },
+  async (url, init) => {
+    assert.equal(String(url), "https://api.openai.com/v1/chat/completions");
+    rankRaw = String(init?.body ?? "");
+    const header = new Headers(init?.headers).get("authorization") ?? "";
+    rankAuthOk = header === `Bearer ${rankSecret}`;
+    return new Response(
+      JSON.stringify({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                rows: [
+                  { id: "SELL1", verdict: "drop", sentence: "Hide this sell even though the close is 36.63." },
+                  { id: "ADD1", verdict: "drop", sentence: "Risk note: close 36.63 is extended versus SMA50 33." },
+                  { id: "BUY1", verdict: "keep", sentence: keptSentence },
+                  { id: "BUY2", verdict: "drop", sentence: "Close 36.63 is fine but drop it." },
+                  { id: "NOT-A-CANDIDATE", verdict: "keep", sentence: "Close 999 should be bought." },
+                  ...Array.from({ length: MODEL_BUY_CAP }, (_, index) => ({
+                    id: `EXTRA${index}`,
+                    verdict: "keep",
+                    sentence: "Close 999 is invented.",
+                  })),
+                ],
+              }),
+            },
+          },
+        ],
+      }),
+      { status: 200 },
+    );
+  },
+);
+console.log = quiet.log;
+console.error = quiet.error;
+console.warn = quiet.warn;
+console.info = quiet.info;
+console.debug = quiet.debug;
+
+assert.equal(rankAuthOk, true);
+const rankBody = JSON.parse(rankRaw) as {
+  model: string;
+  reasoning_effort: string;
+  response_format: { type: string };
+  messages: Array<{ content?: string }>;
+};
+assert.equal(rankBody.model, RANK_MODEL);
+assert.equal(rankBody.model.includes("mini"), false);
+assert.equal(rankBody.reasoning_effort, "none");
+assert.equal(rankBody.response_format.type, "json_schema");
+assert.equal(containsSecret(rankBody, rankSecret), false);
+assert.equal(rankBody.messages.some((message) => message.content?.includes("Rules passed")), false);
+assert.equal(containsSecret(rankLogs, rankSecret), false);
+assert.equal(containsSecret(ranked, rankSecret), false);
+assert.deepEqual(
+  ranked.rows.map((row) => row.id),
+  ["SELL1", "ADD1", "BUY1", ...Array.from({ length: MODEL_BUY_CAP - 1 }, (_, index) => `EXTRA${index}`)],
+);
+const sell = ranked.rows.find((row) => row.id === "SELL1");
+assert.equal(sell?.confirmable, true);
+assert.equal(sell?.action, "sell");
+assert.equal(sell?.reason, "sell SELL1. Rules passed.");
+const add = ranked.rows.find((row) => row.id === "ADD1");
+assert.equal(add?.reason, "add ADD1. Rules passed. Risk note: close 36.63 is extended versus SMA50 33.");
+const keptBuy = ranked.rows.find((row) => row.id === "BUY1");
+assert.equal(keptBuy?.reason, `buy BUY1. Rules passed. ${keptSentence}`);
+assert.equal(keptBuy?.order?.reason, keptBuy?.reason);
+assert.equal(ranked.rows.some((row) => row.id === "BUY2" || row.id === "NOT-A-CANDIDATE"), false);
+assert.equal(ranked.rows.some((row) => row.reason.includes("999")), false);
+assert.equal(ranked.model, "on");
+assert.match(ranked.modelNote, /at most 3/);
+
+const failed = await rankPassed(
+  [{ row: rankRow("SELL1", "sell", "owned"), figures: rankFigures }, { row: rankRow("BUY1", "buy", "new"), figures: rankFigures }],
+  { OPENAI_API_KEY: rankSecret },
+  async () => {
+    throw new Error(`network failed ${rankSecret}`);
+  },
+);
+assert.equal(failed.model, "unavailable");
+assert.match(failed.modelNote, /kept the rule results/);
+assert.equal(containsSecret(failed, rankSecret), false);
+assert.deepEqual(failed.rows.map((row) => row.id), ["SELL1", "BUY1"]);
+assert.equal(failed.rows[0]?.confirmable, true);
 
 console.log("selfcheck ok");

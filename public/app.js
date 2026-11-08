@@ -84,7 +84,7 @@ function render() {
   const unset = desk?.unset?.length ? `<p>Unset: ${esc(desk.unset.join(", "))}</p>` : "";
   const market = desk?.market;
   const marketLine = market
-    ? `<p class="muted">Market scan reviewed ${esc(market.stocksReviewed)} new stocks and ${esc(market.cryptoReviewed)} crypto pairs. New buys: ${esc(market.newStockBuys)} stocks, ${esc(market.newCryptoBuys)} crypto. No order is sent.</p>${market.note ? `<p class="sell">${esc(market.note)}</p>` : ""}`
+    ? `<p class="muted">Market scan reviewed ${esc(market.stocksReviewed)} new stocks and ${esc(market.cryptoReviewed)} crypto pairs. New buys: ${esc(market.newStockBuys)} stocks, ${esc(market.newCryptoBuys)} crypto. No order is sent.</p>${market.modelNote ? `<p class="muted">${esc(market.modelNote)}</p>` : ""}${market.note ? `<p class="sell">${esc(market.note)}</p>` : ""}`
     : recommendations.length
       ? ""
       : `<p class="muted">No recommendations yet. Scan portfolio does not send an order.</p>`;

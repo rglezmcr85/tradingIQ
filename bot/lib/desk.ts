@@ -28,6 +28,7 @@ import {
   type SleeveFile,
   type SleeveReview,
 } from "./sleeve";
+import { rankingOffNote, rankPassed, type RankFigures } from "./rank";
 import { buildTechnicalReport, type TechnicalReport } from "./technicals";
 import { scanUniverse } from "./universe";
 
@@ -76,6 +77,7 @@ export type DeskReport = {
     newStockBuys: number;
     newCryptoBuys: number;
     note: string | null;
+    modelNote: string | null;
   };
   recommendations: Recommendation[];
 };
@@ -98,7 +100,7 @@ function emptyReport(partial: Partial<DeskReport> = {}): DeskReport {
     portfolio: [],
     owned: [],
     newNames: [],
-    market: { stocksReviewed: 0, cryptoReviewed: 0, newStockBuys: 0, newCryptoBuys: 0, note: null },
+    market: { stocksReviewed: 0, cryptoReviewed: 0, newStockBuys: 0, newCryptoBuys: 0, note: null, modelNote: null },
     recommendations: [],
     ...partial,
   };
@@ -210,6 +212,31 @@ function factsFrom(
   };
 }
 
+function rankFigures(
+  technical: TechnicalReport,
+  fundamental: FundamentalReport | null,
+  marketCap: number | null,
+  order: PlannedOrder | null,
+): RankFigures {
+  const filed = fundamental?.status === "ok" ? fundamental : null;
+  return {
+    asOf: technical.asOf,
+    trend: technical.trend,
+    lastClose: technical.lastClose,
+    sma20: technical.sma20,
+    sma50: technical.sma50,
+    rsi14: technical.rsi14,
+    netIncome: filed?.netIncome ?? null,
+    revenueGrowth: filed?.revenueGrowth ?? null,
+    trailingPe: filed?.trailingPe ?? null,
+    marketCap,
+    qty: order?.estimatedQty ?? null,
+    notional: order?.estimatedNotional ?? null,
+  };
+}
+
+type PassedName = { recommendation: Recommendation; figures: RankFigures };
+
 async function analyzeOwned(input: {
   position: AlpacaPosition;
   asset: AlpacaAsset | null;
@@ -218,7 +245,7 @@ async function analyzeOwned(input: {
   sleeveCost: number;
   sleeveQty: number;
   budget: number;
-}): Promise<Recommendation | null> {
+}): Promise<PassedName | null> {
   const symbol = input.position.orderSymbol;
   const bars = await pullDailyBars(symbol);
   const technical = buildTechnicalReport(symbol, bars);
@@ -288,19 +315,23 @@ async function analyzeOwned(input: {
   const written = deskReason(factsFrom(symbol, managed.action, technical, fundamental, input.marketCap, order, skip));
   if (order) order.reason = written.reason;
   const confirmable = written.confirmable && order != null;
+  const shown = confirmable ? order : null;
   return {
-    id: randomUUID(),
-    symbol,
-    name: symbol,
-    assetClass: input.position.assetClass,
-    scope: "owned",
-    action: managed.action,
-    reason: written.reason,
-    confirmable,
-    blocker: confirmable ? null : (skip ?? "Not confirmable until both a technical figure and a fundamental figure are present."),
-    order: confirmable ? order : null,
-    status: "recommendation",
-    alpacaOrderId: null,
+    recommendation: {
+      id: randomUUID(),
+      symbol,
+      name: symbol,
+      assetClass: input.position.assetClass,
+      scope: "owned",
+      action: managed.action,
+      reason: written.reason,
+      confirmable,
+      blocker: confirmable ? null : (skip ?? "Not confirmable until both a technical figure and a fundamental figure are present."),
+      order: shown,
+      status: "recommendation",
+      alpacaOrderId: null,
+    },
+    figures: rankFigures(technical, fundamental, input.marketCap, shown),
   };
 }
 
@@ -355,6 +386,14 @@ export async function runDesk(env: NodeJS.ProcessEnv = process.env): Promise<Des
       sleeveCash: sleeve.cash,
       buyingPowerUsed: Math.min(SLEEVE_CAP, openCost(sleeve)),
       generatedAt: new Date().toISOString(),
+      market: {
+        stocksReviewed: 0,
+        cryptoReviewed: 0,
+        newStockBuys: 0,
+        newCryptoBuys: 0,
+        note: null,
+        modelNote: rankingOffNote(env),
+      },
     });
     await writeStore({ recommendations: [], report });
     return report;
@@ -370,15 +409,15 @@ export async function runDesk(env: NodeJS.ProcessEnv = process.env): Promise<Des
   const tickers = await loadTickerMap();
   const cryptoSymbols = positions.filter((position) => position.assetClass === "crypto").map((position) => position.orderSymbol);
   const caps = await coinMarketCaps(cryptoSymbols);
-  const owned: Recommendation[] = [];
-  const newNames: Recommendation[] = [];
+  const ownedPassed: PassedName[] = [];
+  const newPassed: PassedName[] = [];
   const budget = spendable(sleeve.cash, openCost(sleeve));
   for (const position of positions) {
     try {
       const asset = await alpaca.asset(position.orderSymbol);
       const held = sleeve.positions.find((item) => item.symbol === position.orderSymbol);
       const marketCap = caps.get(position.orderSymbol.split("/")[0].toLowerCase()) ?? null;
-      const recommendation = await analyzeOwned({
+      const passed = await analyzeOwned({
         position,
         asset,
         tickers,
@@ -387,7 +426,7 @@ export async function runDesk(env: NodeJS.ProcessEnv = process.env): Promise<Des
         sleeveQty: held?.qty ?? 0,
         budget,
       });
-      if (recommendation) owned.push(recommendation);
+      if (passed) ownedPassed.push(passed);
     } catch {
       // One held name failing does not cancel the market scan.
     }
@@ -423,18 +462,18 @@ export async function runDesk(env: NodeJS.ProcessEnv = process.env): Promise<Des
       } catch {
         asset = null;
       }
-      const recommendation = await analyzeNew({
+      const passed = await analyzeNew({
         symbol: pass.hit.symbol,
         name: pass.hit.name,
         assetClass: "us_equity",
         tickers,
-        marketCap: null,
+        marketCap: pass.hit.marketCap > 0 ? pass.hit.marketCap : null,
         asset,
         budget,
         technical: pass.technical,
       });
-      if (recommendation) {
-        newNames.push(recommendation);
+      if (passed) {
+        newPassed.push(passed);
         newStockBuys += 1;
       }
     }
@@ -464,7 +503,7 @@ export async function runDesk(env: NodeJS.ProcessEnv = process.env): Promise<Des
     for (const pass of screens) {
       if (!pass) continue;
       if (newCryptoBuys >= NEW_CRYPTO_BUYS) break;
-      const recommendation = await analyzeNew({
+      const passed = await analyzeNew({
         symbol: pass.pair.symbol,
         name: pass.pair.symbol,
         assetClass: "crypto",
@@ -474,14 +513,30 @@ export async function runDesk(env: NodeJS.ProcessEnv = process.env): Promise<Des
         budget,
         technical: pass.technical,
       });
-      if (recommendation) {
-        newNames.push(recommendation);
+      if (passed) {
+        newPassed.push(passed);
         newCryptoBuys += 1;
       }
     }
   } catch (err) {
     notes.push(err instanceof Error ? err.message : "The crypto market scan failed.");
   }
+  let owned = ownedPassed.map((item) => item.recommendation);
+  let newNames = newPassed.map((item) => item.recommendation);
+  let modelNote = rankingOffNote(env) ?? "OpenAI ranking did not run. This scan kept the rule results.";
+  try {
+    const ranked = await rankPassed(
+      [...ownedPassed, ...newPassed].map((item) => ({ row: item.recommendation, figures: item.figures })),
+      env,
+    );
+    owned = ranked.rows.filter((row) => row.scope === "owned");
+    newNames = ranked.rows.filter((row) => row.scope === "new");
+    modelNote = ranked.modelNote;
+  } catch {
+    // A ranking failure leaves the rule rows in place. The scan still returns.
+  }
+  const keptStockBuys = newNames.filter((row) => row.assetClass === "us_equity").length;
+  const keptCryptoBuys = newNames.filter((row) => row.assetClass === "crypto").length;
   const recommendations = [...owned, ...newNames];
   const report = emptyReport({
     generatedAt: new Date().toISOString(),
@@ -502,9 +557,10 @@ export async function runDesk(env: NodeJS.ProcessEnv = process.env): Promise<Des
     market: {
       stocksReviewed,
       cryptoReviewed,
-      newStockBuys,
-      newCryptoBuys,
+      newStockBuys: keptStockBuys,
+      newCryptoBuys: keptCryptoBuys,
       note: notes.length > 0 ? notes.join(" ") : null,
+      modelNote,
     },
     recommendations,
     blocker: null,
@@ -522,7 +578,7 @@ async function analyzeNew(input: {
   asset: AlpacaAsset | null;
   budget: number;
   technical?: TechnicalReport;
-}): Promise<Recommendation | null> {
+}): Promise<PassedName | null> {
   let pulled = input.technical;
   if (!pulled) {
     try {
@@ -561,19 +617,23 @@ async function analyzeNew(input: {
   const written = deskReason(factsFrom(input.symbol, "buy", technical, fundamental, input.marketCap, order, skip));
   if (order) order.reason = written.reason;
   const confirmable = written.confirmable && order != null;
+  const shown = confirmable ? order : null;
   return {
-    id: randomUUID(),
-    symbol: input.symbol,
-    name: input.name,
-    assetClass: input.assetClass,
-    scope: "new",
-    action: "buy",
-    reason: written.reason,
-    confirmable,
-    blocker: confirmable ? null : (skip ?? "Not confirmable until both a technical figure and a fundamental figure are present."),
-    order: confirmable ? order : null,
-    status: "recommendation",
-    alpacaOrderId: null,
+    recommendation: {
+      id: randomUUID(),
+      symbol: input.symbol,
+      name: input.name,
+      assetClass: input.assetClass,
+      scope: "new",
+      action: "buy",
+      reason: written.reason,
+      confirmable,
+      blocker: confirmable ? null : (skip ?? "Not confirmable until both a technical figure and a fundamental figure are present."),
+      order: shown,
+      status: "recommendation",
+      alpacaOrderId: null,
+    },
+    figures: rankFigures(technical, fundamental, input.marketCap, shown),
   };
 }
 
