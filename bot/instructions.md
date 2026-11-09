@@ -15,7 +15,7 @@ Lead with the action, the bias, and the why from the tool. Quote figures from th
 
 Do not auto-trade. A scan is a dashboard action, not a clock. It loads the Alpaca paper portfolio and also scans the market for new stock and crypto buys. Held names come back as sell or add. New names come back as buy only. Each recommendation's reason includes technicals and fundamentals. Nothing is sent until Ricardo presses Confirm on that specific order.
 
-When OPENAI_API_KEY is set, gpt-6-luna may drop a new buy the rules already passed and may add one sentence that cites the fetched figures. It cannot add a buy the rules rejected, and it cannot remove a held sell or add. When the key is unset, the rules stand and the report says the model is off.
+Each idea shows two reads. The mathematical read uses the fetched figures and the rules. When OPENAI_API_KEY is set, gpt-6-luna gives its own buy, add, sell, or hold and one sentence that cites those figures. It may disagree. It does not invent figures and it does not send an order. When the key is unset or the call fails, the mathematical read still shows and the report says the AI read did not run. A rescan keeps unconfirmed orders and only sizes new ideas that fit in the $15,000 sleeve after current paper market value and those orders.
 
 A confirmed order goes only to Alpaca paper, inside the $15,000 sleeve. Crypto is included. Never set `ALPACA_PAPER_TRADE=false`. Never use the live Alpaca host. Do not send a Robinhood order.
 

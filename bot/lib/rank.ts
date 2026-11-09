@@ -1,29 +1,27 @@
 /**
- * Optional keep/drop after the rule checks.
+ * AI read on figures the scan already fetched.
  * The key is read only from OPENAI_API_KEY. It is never logged, stored, or returned.
- * gpt-6-luna is the non-mini chat model that replaces GPT-4.1. Ranking stays a short JSON step.
+ * gpt-6-luna is the chat model. reasoning_effort none keeps the call a short JSON step.
+ * This is an opinion. It does not add or remove ideas.
  */
 
 export const RANK_MODEL = "gpt-6-luna";
-/** At most a few new buys stay. Held sells and adds are not capped. */
-export const MODEL_BUY_CAP = 3;
 
 const OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions";
-const OFF_NOTE = "OpenAI ranking is off because OPENAI_API_KEY is unset. This scan uses the rules only.";
-const UNAVAILABLE_NOTE = "OpenAI ranking did not run. This scan kept the rule results.";
+const OFF_NOTE = "AI read did not run because OPENAI_API_KEY is unset. The mathematical read is shown.";
+const UNAVAILABLE_NOTE = "AI read did not run. The mathematical read is shown.";
 
 const SYSTEM = [
-  "You rank candidates that already passed the trading rules.",
-  "Read only the numbers in the payload. Do not invent a price, average, RSI, filing figure, market cap, or quantity.",
+  "You give your own technical and fundamental read for each idea.",
+  "Use only the numbers in that idea. Do not invent a price, average, RSI, filing figure, market cap, or quantity.",
   "A null field was not fetched. Do not fill it in.",
-  "For action buy, set verdict to keep or drop. Do not add a symbol that is not in the payload.",
-  `The desk keeps at most ${MODEL_BUY_CAP} buys marked keep, in the listed order.`,
-  "For action sell or add, set verdict to keep. sentence is a short risk note. Do not hide a sell.",
-  "sentence is one sentence and cites only numbers present on that candidate.",
+  "action is buy, add, sell, or hold. Use add only when held is true. Use buy only when held is false.",
+  "You may disagree with a rule-based read. Do not change a quantity.",
+  "sentence is one sentence and cites only numbers present on that idea.",
   "Copy id exactly.",
 ].join(" ");
 
-const RANK_SCHEMA = {
+const READ_SCHEMA = {
   type: "object",
   additionalProperties: false,
   properties: {
@@ -34,10 +32,10 @@ const RANK_SCHEMA = {
         additionalProperties: false,
         properties: {
           id: { type: "string" },
-          verdict: { type: "string", enum: ["keep", "drop"] },
+          action: { type: "string", enum: ["buy", "add", "sell", "hold"] },
           sentence: { type: "string" },
         },
-        required: ["id", "verdict", "sentence"],
+        required: ["id", "action", "sentence"],
       },
     },
   },
@@ -59,25 +57,21 @@ export type RankFigures = {
   notional: number | null;
 };
 
-export type RankRow = {
-  id: string;
-  symbol: string;
-  action: "buy" | "add" | "sell";
-  scope: "owned" | "new";
-  confirmable: boolean;
-  reason: string;
-  order: { reason: string } | null;
+export type DeskAction = "buy" | "add" | "sell" | "hold";
+
+export type AiOpinion = {
+  action: DeskAction;
+  sentence: string | null;
 };
 
-export type Ranked<T extends RankRow> = {
-  rows: T[];
+export type AiReadResult = {
+  byId: Map<string, AiOpinion>;
   model: "off" | "on" | "unavailable";
   modelNote: string;
 };
 
-type Verdict = { verdict: "keep" | "drop"; sentence: string };
+type RawOpinion = { action: DeskAction; sentence: string };
 
-/** Blank or missing is off. The value stays in this function and the Authorization header. */
 function openAiKey(env: NodeJS.ProcessEnv): string | null {
   const value = env.OPENAI_API_KEY;
   if (typeof value !== "string") return null;
@@ -133,7 +127,6 @@ function closeEnough(candidate: number, allowed: number): boolean {
   return diff <= 0.06 || diff / scale <= 0.02;
 }
 
-/** A cited number has to be one the scan already fetched. Indicator names are not figures. */
 function citesOnlyFetched(sentence: string, figures: RankFigures): boolean {
   const stripped = sentence.replace(/SMA\s*20/gi, " ").replace(/SMA\s*50/gi, " ").replace(/RSI\s*14/gi, " ");
   const matches = stripped.match(/-?\d[\d,]*(?:\.\d+)?/g) ?? [];
@@ -145,54 +138,32 @@ function citesOnlyFetched(sentence: string, figures: RankFigures): boolean {
   });
 }
 
-function usableSentence(text: string, figures: RankFigures, action: RankRow["action"]): string | null {
+function usableSentence(text: string, figures: RankFigures): string | null {
   const sentence = oneSentence(text);
   if (!sentence || !citesOnlyFetched(sentence, figures)) return null;
-  if (action === "sell" && /\b(hide|skip|ignore|cancel)\b/i.test(sentence)) return null;
   return sentence;
 }
 
-function sticky(row: RankRow): boolean {
-  return row.scope === "owned" || row.action === "sell" || row.action === "add";
+function normalizeAction(action: string, held: boolean): DeskAction | null {
+  if (action !== "buy" && action !== "add" && action !== "sell" && action !== "hold") return null;
+  if (!held && action === "add") return "buy";
+  if (held && action === "buy") return "add";
+  return action;
 }
 
-function applyVerdicts<T extends RankRow>(
-  passed: Array<{ row: T; figures: RankFigures }>,
-  byId: Map<string, Verdict>,
-): T[] {
-  const kept: T[] = [];
-  let buys = 0;
-  for (const item of passed) {
-    const row = item.row;
-    const verdict = byId.get(row.id);
-    if (!sticky(row)) {
-      if (!verdict || verdict.verdict !== "keep") continue;
-      if (buys >= MODEL_BUY_CAP) continue;
-      buys += 1;
-    }
-    const sentence = verdict ? usableSentence(verdict.sentence, item.figures, row.action) : null;
-    if (sentence) {
-      row.reason = `${row.reason} ${sentence}`;
-      if (row.order) row.order.reason = row.reason;
-    }
-    kept.push(row);
-  }
-  return kept;
-}
-
-function readVerdicts(body: unknown): Map<string, Verdict> | null {
+function readOpinions(body: unknown): Map<string, RawOpinion> | null {
   if (!body || typeof body !== "object") return null;
   const rows = (body as { rows?: unknown }).rows;
   if (!Array.isArray(rows)) return null;
-  const map = new Map<string, Verdict>();
+  const map = new Map<string, RawOpinion>();
   for (const row of rows) {
     if (!row || typeof row !== "object") return null;
     const id = (row as { id?: unknown }).id;
-    const verdict = (row as { verdict?: unknown }).verdict;
+    const action = (row as { action?: unknown }).action;
     const sentence = (row as { sentence?: unknown }).sentence;
-    if (typeof id !== "string" || (verdict !== "keep" && verdict !== "drop")) return null;
-    if (typeof sentence !== "string") return null;
-    if (!map.has(id)) map.set(id, { verdict, sentence });
+    if (typeof id !== "string" || typeof action !== "string" || typeof sentence !== "string") return null;
+    if (action !== "buy" && action !== "add" && action !== "sell" && action !== "hold") return null;
+    if (!map.has(id)) map.set(id, { action, sentence });
   }
   return map;
 }
@@ -209,11 +180,11 @@ function messageText(content: unknown): string | null {
   return text.trim() ? text : null;
 }
 
-async function requestRank(
+async function requestReads(
   key: string,
-  passed: Array<{ row: RankRow; figures: RankFigures }>,
+  ideas: Array<{ id: string; symbol: string; held: boolean; figures: RankFigures }>,
   fetchImpl: typeof fetch,
-): Promise<Map<string, Verdict> | null> {
+): Promise<Map<string, RawOpinion> | null> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 25_000);
   try {
@@ -226,13 +197,13 @@ async function requestRank(
       body: JSON.stringify({
         model: RANK_MODEL,
         reasoning_effort: "none",
-        max_completion_tokens: 1200,
+        max_completion_tokens: 1600,
         response_format: {
           type: "json_schema",
           json_schema: {
-            name: "desk_rank",
+            name: "desk_read",
             strict: true,
-            schema: RANK_SCHEMA,
+            schema: READ_SCHEMA,
           },
         },
         messages: [
@@ -240,11 +211,11 @@ async function requestRank(
           {
             role: "user",
             content: JSON.stringify({
-              candidates: passed.map((item) => ({
-                id: item.row.id,
-                symbol: item.row.symbol,
-                action: item.row.action,
-                figures: item.figures,
+              ideas: ideas.map((idea) => ({
+                id: idea.id,
+                symbol: idea.symbol,
+                held: idea.held,
+                figures: idea.figures,
               })),
             }),
           },
@@ -257,38 +228,43 @@ async function requestRank(
     const parsed = JSON.parse(text) as { choices?: Array<{ message?: { content?: unknown } }> };
     const content = messageText(parsed.choices?.[0]?.message?.content);
     if (!content) return null;
-    return readVerdicts(JSON.parse(content));
+    return readOpinions(JSON.parse(content));
   } finally {
     clearTimeout(timer);
   }
 }
 
-export async function rankPassed<T extends RankRow>(
-  passed: Array<{ row: T; figures: RankFigures }>,
+export async function readIdeas(
+  ideas: Array<{ id: string; symbol: string; held: boolean; figures: RankFigures }>,
   env: NodeJS.ProcessEnv,
   fetchImpl: typeof fetch = fetch,
-): Promise<Ranked<T>> {
-  const rows = passed.map((item) => item.row);
+): Promise<AiReadResult> {
   const key = openAiKey(env);
-  if (!key) return { rows, model: "off", modelNote: OFF_NOTE };
-  if (passed.length === 0) {
+  if (!key) return { byId: new Map(), model: "off", modelNote: OFF_NOTE };
+  if (ideas.length === 0) {
     return {
-      rows,
+      byId: new Map(),
       model: "on",
-      modelNote: "OpenAI ranking is on. No passed candidate was sent, so this scan uses the rules only.",
+      modelNote: "AI read is on. No idea was sent, so only the mathematical read is shown.",
     };
   }
   try {
-    const verdicts = await requestRank(key, passed, fetchImpl);
-    if (!verdicts) return { rows, model: "unavailable", modelNote: UNAVAILABLE_NOTE };
-    const next = applyVerdicts(passed, verdicts);
-    const buys = next.filter((row) => row.action === "buy" && row.scope === "new").length;
+    const raw = await requestReads(key, ideas, fetchImpl);
+    if (!raw) return { byId: new Map(), model: "unavailable", modelNote: UNAVAILABLE_NOTE };
+    const byId = new Map<string, AiOpinion>();
+    for (const idea of ideas) {
+      const opinion = raw.get(idea.id);
+      if (!opinion) continue;
+      const action = normalizeAction(opinion.action, idea.held);
+      if (!action) continue;
+      byId.set(idea.id, { action, sentence: usableSentence(opinion.sentence, idea.figures) });
+    }
     return {
-      rows: next,
+      byId,
       model: "on",
-      modelNote: `OpenAI ranking kept ${buys} new buys (at most ${MODEL_BUY_CAP}). Held sells and adds stay.`,
+      modelNote: "AI read used gpt-6-luna on the fetched figures. It can disagree with the mathematical read.",
     };
   } catch {
-    return { rows, model: "unavailable", modelNote: UNAVAILABLE_NOTE };
+    return { byId: new Map(), model: "unavailable", modelNote: UNAVAILABLE_NOTE };
   }
 }

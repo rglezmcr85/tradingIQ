@@ -185,6 +185,28 @@ export type AlpacaPosition = {
   currentPrice: number | null;
 };
 
+/** Alpaca lists pairs as BTC/USD and positions as BTCUSD. Both mean the USD pair. */
+export function asUsdPair(symbol: string): string | null {
+  const upper = symbol.trim().toUpperCase();
+  if (upper.endsWith("/USD") && upper.length > 4) return upper;
+  if (/^[A-Z0-9]+USD$/.test(upper) && upper.length >= 6) return `${upper.slice(0, -3)}/USD`;
+  return null;
+}
+
+export function usdCryptoAssets(rows: AlpacaAsset[]): AlpacaAsset[] {
+  const seen = new Set<string>();
+  const pairs: AlpacaAsset[] = [];
+  for (const row of rows) {
+    if (row.assetClass !== "crypto") continue;
+    const pair = asUsdPair(row.symbol);
+    if (!pair || seen.has(pair)) continue;
+    seen.add(pair);
+    pairs.push({ ...row, symbol: pair });
+  }
+  const tradable = pairs.filter((row) => row.tradable);
+  return tradable.length > 0 ? tradable : pairs;
+}
+
 export function orderSymbolFor(symbol: string, assetClass: "us_equity" | "crypto"): string {
   if (assetClass === "crypto" && !symbol.includes("/") && symbol.endsWith("USD") && symbol.length > 3) {
     return `${symbol.slice(0, -3)}/USD`;
@@ -230,12 +252,20 @@ export function createAlpacaPaper(env: NodeJS.ProcessEnv = process.env, fetchImp
       };
     },
     async asset(symbol: string): Promise<AlpacaAsset | null> {
-      try {
-        const body = (await get(`/v2/assets/${encodeURIComponent(symbol)}`)) as Record<string, unknown>;
-        return parseAsset(body);
-      } catch {
-        return null;
+      const pair = asUsdPair(symbol);
+      const candidates = [...new Set([symbol, pair, pair ? pair.replace("/", "") : null].filter((item): item is string => !!item))];
+      for (const candidate of candidates) {
+        try {
+          const body = (await get(`/v2/assets/${encodeURIComponent(candidate)}`)) as Record<string, unknown>;
+          const parsed = parseAsset(body);
+          if (!parsed) continue;
+          if (pair) parsed.symbol = pair;
+          return parsed;
+        } catch {
+          // Try the other crypto symbol form. BTC/USD and BTCUSD are the same pair.
+        }
       }
+      return null;
     },
     async cryptoUsdPairs(): Promise<AlpacaAsset[]> {
       const res = await fetchImpl(paperUrl("/v2/assets?asset_class=crypto&status=active"), {
@@ -244,9 +274,7 @@ export function createAlpacaPaper(env: NodeJS.ProcessEnv = process.env, fetchImp
       const text = await res.text();
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const rows = JSON.parse(text) as Record<string, unknown>[];
-      return rows
-        .map((row) => parseAsset(row))
-        .filter((row): row is AlpacaAsset => row != null && row.tradable && row.symbol.endsWith("/USD"));
+      return usdCryptoAssets(rows.map((row) => parseAsset(row)).filter((row): row is AlpacaAsset => row != null));
     },
     async positions(): Promise<AlpacaPosition[]> {
       const res = await fetchImpl(paperUrl("/v2/positions"), { headers });

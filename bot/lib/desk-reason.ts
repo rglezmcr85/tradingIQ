@@ -2,7 +2,7 @@
 
 export type DeskFacts = {
   symbol: string;
-  action: "buy" | "add" | "sell";
+  action: "buy" | "add" | "sell" | "hold";
   technical: {
     asOf: string | null;
     lastClose: number | null;
@@ -48,7 +48,7 @@ export function deskReason(facts: DeskFacts): { reason: string; confirmable: boo
       : facts.fundamental.source === "sec-edgar-companyfacts"
         ? `Fundamentals (SEC company facts): annual revenue growth ${pct(facts.fundamental.revenueGrowth)}, net income ${facts.fundamental.netIncome == null ? "missing" : num(facts.fundamental.netIncome, 0)}, trailing P/E ${num(facts.fundamental.trailingPe, 1)}.`
         : "Fundamentals: missing. No fundamental figure was pulled.";
-  const verb = facts.action === "add" ? "Add" : facts.action === "sell" ? "Sell" : "Buy";
+  const verb = facts.action === "add" ? "Add" : facts.action === "sell" ? "Sell" : facts.action === "hold" ? "Hold" : "Buy";
   const reason = `${verb} ${facts.symbol}. ${technical} ${fundamental} ${facts.orderLine}`;
-  return { reason, confirmable: technicalReady && fundamentalReady };
+  return { reason, confirmable: facts.action !== "hold" && technicalReady && fundamentalReady };
 }

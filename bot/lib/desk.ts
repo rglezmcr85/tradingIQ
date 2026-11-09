@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import {
+  asUsdPair,
   createAlpacaPaper,
   paperCredentials,
   submitPaperOrder,
@@ -14,28 +15,34 @@ import { loadTickerMap, pullFundamentals, type FundamentalReport } from "./funda
 import { fetchText } from "./http";
 import { dataDir, recommendationsPath } from "./paths";
 import { pullDailyBars } from "./prices";
+import { rankingOffNote, readIdeas, type DeskAction, type RankFigures } from "./rank";
 import { writeResearch } from "./research";
 import {
   applyAcceptedOrder,
   CASH_SKIP,
   loadSleeve,
+  markedSleeveValue,
+  orderForNotional,
   planSleeve,
   saveSleeve,
+  settleSleeveIdeas,
   SLEEVE_CAP,
+  SLEEVE_MAX_POSITIONS,
   spendable,
   openCost,
   type PlannedOrder,
   type SleeveFile,
+  type SleeveIdea,
   type SleeveReview,
 } from "./sleeve";
-import { rankingOffNote, rankPassed, type RankFigures } from "./rank";
 import { buildTechnicalReport, type TechnicalReport } from "./technicals";
 import { scanUniverse } from "./universe";
 
 const STOCK_WALK = 40;
-const CRYPTO_WALK = 16;
+const CRYPTO_WALK = 24;
 const NEW_STOCK_BUYS = 8;
-const NEW_CRYPTO_BUYS = 4;
+const CRYPTO_SHOW = 8;
+const CRYPTO_MAJORS = ["BTC", "ETH", "SOL", "XRP", "DOGE", "ADA", "AVAX", "LINK", "LTC", "BCH", "DOT", "UNI", "SHIB", "TRX", "TON"];
 const FUNDAMENTAL_CAP = 12;
 const PULL_CONCURRENCY = 4;
 
@@ -45,7 +52,12 @@ export type Recommendation = {
   name: string;
   assetClass: "us_equity" | "crypto";
   scope: "owned" | "new";
-  action: "buy" | "add" | "sell";
+  /** Mathematical action. The sized order follows this read. */
+  action: DeskAction;
+  math: { action: DeskAction; reason: string };
+  /** Null when the model is off or the call failed. */
+  ai: { action: DeskAction; reason: string } | null;
+  figures: RankFigures | null;
   reason: string;
   confirmable: boolean;
   blocker: string | null;
@@ -67,7 +79,7 @@ export type DeskReport = {
   sleeveCash: number;
   buyingPowerUsed: number;
   portfolio: Array<{ symbol: string; qty: number; marketValue: number | null; assetClass: "us_equity" | "crypto" }>;
-  /** Sell or add on names already in the Alpaca paper account. Hold is omitted. */
+  /** Held names, including hold. */
   owned: Recommendation[];
   /** Buy ideas from the market scan. Stocks and crypto. Not names he already holds. */
   newNames: Recommendation[];
@@ -78,6 +90,9 @@ export type DeskReport = {
     newCryptoBuys: number;
     note: string | null;
     modelNote: string | null;
+    positionMarketValue: number;
+    reservedNotional: number;
+    sleeveRoom: number;
   };
   recommendations: Recommendation[];
 };
@@ -100,7 +115,17 @@ function emptyReport(partial: Partial<DeskReport> = {}): DeskReport {
     portfolio: [],
     owned: [],
     newNames: [],
-    market: { stocksReviewed: 0, cryptoReviewed: 0, newStockBuys: 0, newCryptoBuys: 0, note: null, modelNote: null },
+    market: {
+      stocksReviewed: 0,
+      cryptoReviewed: 0,
+      newStockBuys: 0,
+      newCryptoBuys: 0,
+      note: null,
+      modelNote: null,
+      positionMarketValue: 0,
+      reservedNotional: 0,
+      sleeveRoom: SLEEVE_CAP,
+    },
     recommendations: [],
     ...partial,
   };
@@ -258,7 +283,6 @@ async function analyzeOwned(input: {
     decision = decide(technical, fundamental, writeResearch(technical, fundamental));
   }
   const managed = managePosition(decision);
-  if (managed.action === "hold") return null;
   const price = technical.lastClose;
   const fractionable = input.asset?.fractionable === true;
   const review: SleeveReview = {
@@ -277,7 +301,9 @@ async function analyzeOwned(input: {
   };
   let order: PlannedOrder | null = null;
   let skip: string | null = null;
-  if (managed.action === "sell") {
+  if (managed.action === "hold") {
+    skip = "Hold. No Alpaca paper order is sized. Nothing will be sent.";
+  } else if (managed.action === "sell") {
     if (price == null || !(input.position.qty > 0)) skip = "Sell signal, but there is no completed price, so no order was sized.";
     else {
       order = {
@@ -324,6 +350,9 @@ async function analyzeOwned(input: {
       assetClass: input.position.assetClass,
       scope: "owned",
       action: managed.action,
+      math: { action: managed.action, reason: written.reason },
+      ai: null,
+      figures: rankFigures(technical, fundamental, input.marketCap, shown),
       reason: written.reason,
       confirmable,
       blocker: confirmable ? null : (skip ?? "Not confirmable until both a technical figure and a fundamental figure are present."),
@@ -393,6 +422,9 @@ export async function runDesk(env: NodeJS.ProcessEnv = process.env): Promise<Des
         newCryptoBuys: 0,
         note: null,
         modelNote: rankingOffNote(env),
+        positionMarketValue: 0,
+        reservedNotional: 0,
+        sleeveRoom: SLEEVE_CAP,
       },
     });
     await writeStore({ recommendations: [], report });
@@ -431,7 +463,25 @@ export async function runDesk(env: NodeJS.ProcessEnv = process.env): Promise<Des
       // One held name failing does not cancel the market scan.
     }
   }
-  const heldSymbols = new Set(positions.map((position) => position.orderSymbol));
+  const heldSymbols = new Set<string>();
+  for (const position of positions) {
+    heldSymbols.add(position.symbol);
+    heldSymbols.add(position.orderSymbol);
+    const pair = asUsdPair(position.orderSymbol) ?? asUsdPair(position.symbol);
+    if (pair) {
+      heldSymbols.add(pair);
+      heldSymbols.add(pair.replace("/", ""));
+    }
+  }
+  const priorOpen = ((await readStore())?.recommendations ?? [])
+    .filter((row) => row.status === "recommendation" && row.order != null && (row.action === "buy" || row.action === "add" || row.action === "sell"))
+    .map((row) => ({
+      ...row,
+      order: row.order ? { ...row.order } : null,
+      math: row.math ?? { action: row.action, reason: row.reason },
+      ai: row.ai ?? null,
+      figures: row.figures ?? null,
+    }));
   const notes: string[] = [];
   let stocksReviewed = 0;
   let newStockBuys = 0;
@@ -481,20 +531,19 @@ export async function runDesk(env: NodeJS.ProcessEnv = process.env): Promise<Des
     notes.push(err instanceof Error ? err.message : "The stock market scan failed.");
   }
   let cryptoReviewed = 0;
-  let newCryptoBuys = 0;
+  const cryptoPassed: PassedName[] = [];
   try {
     const pairs = await alpaca.cryptoUsdPairs();
     const pairCaps = await coinMarketCaps(pairs.map((pair) => pair.symbol));
     const rankedPairs = [...pairs].sort(
-      (a, b) =>
-        (pairCaps.get(b.symbol.split("/")[0].toLowerCase()) ?? 0) -
-        (pairCaps.get(a.symbol.split("/")[0].toLowerCase()) ?? 0),
+      (a, b) => cryptoSortKey(b.symbol, pairCaps.get(b.symbol.split("/")[0].toLowerCase())) -
+        cryptoSortKey(a.symbol, pairCaps.get(a.symbol.split("/")[0].toLowerCase())),
     );
     const cryptoPool = selectNewHits(rankedPairs, heldSymbols, CRYPTO_WALK);
     const screens = await mapPool(cryptoPool, PULL_CONCURRENCY, async (pair) => {
       try {
         const technical = buildTechnicalReport(pair.symbol, await pullDailyBars(pair.symbol));
-        return technicalBuyReady(technical) ? { pair, technical } : null;
+        return technical.barCount > 0 ? { pair, technical } : null;
       } catch {
         return null;
       }
@@ -502,7 +551,6 @@ export async function runDesk(env: NodeJS.ProcessEnv = process.env): Promise<Des
     cryptoReviewed = cryptoPool.length;
     for (const pass of screens) {
       if (!pass) continue;
-      if (newCryptoBuys >= NEW_CRYPTO_BUYS) break;
       const passed = await analyzeNew({
         symbol: pass.pair.symbol,
         name: pass.pair.symbol,
@@ -513,31 +561,77 @@ export async function runDesk(env: NodeJS.ProcessEnv = process.env): Promise<Des
         budget,
         technical: pass.technical,
       });
-      if (passed) {
-        newPassed.push(passed);
-        newCryptoBuys += 1;
-      }
+      if (passed) cryptoPassed.push(passed);
     }
   } catch (err) {
     notes.push(err instanceof Error ? err.message : "The crypto market scan failed.");
   }
-  let owned = ownedPassed.map((item) => item.recommendation);
-  let newNames = newPassed.map((item) => item.recommendation);
-  let modelNote = rankingOffNote(env) ?? "OpenAI ranking did not run. This scan kept the rule results.";
+  for (const passed of selectCryptoIdeas(cryptoPassed, CRYPTO_SHOW)) newPassed.push(passed);
+  const fresh = [...ownedPassed, ...newPassed].map((item) => item.recommendation);
+  const freshBySymbol = new Map(fresh.map((row) => [row.symbol, row]));
+  const positionMarketValue = markedSleeveValue(
+    sleeve,
+    positions.map((position) => ({ symbol: position.orderSymbol, marketValue: position.marketValue })),
+  );
+  const keptNewBuys = priorOpen.filter((row) => row.scope === "new" && row.action === "buy").length;
+  const settled = settleSleeveIdeas({
+    positionMarketValue,
+    slotsLeft: Math.max(0, SLEEVE_MAX_POSITIONS - sleeve.positions.length - keptNewBuys),
+    kept: priorOpen.map((row) => toSleeveIdea(row)),
+    fresh: fresh.filter((row) => !priorOpen.some((kept) => kept.symbol === row.symbol)).map((row) => toSleeveIdea(row)),
+  });
+  const recommendations = settled.ideas.map((idea) => {
+    const previous = priorOpen.find((row) => row.symbol === idea.symbol);
+    const scanned = freshBySymbol.get(idea.symbol);
+    const base = previous
+      ? {
+          ...(scanned ?? previous),
+          id: previous.id,
+          status: previous.status,
+          alpacaOrderId: previous.alpacaOrderId,
+          order: scanned?.order ?? previous.order,
+          confirmable: scanned?.order ? scanned.confirmable : previous.confirmable,
+          math: scanned?.math ?? previous.math ?? { action: previous.action, reason: previous.reason },
+          reason: scanned?.reason ?? previous.reason,
+          figures: scanned?.figures ?? previous.figures,
+          action: scanned?.action ?? previous.action,
+        }
+      : scanned;
+    if (!base) return null;
+    return applyBuyNotional(base, idea);
+  }).filter((row): row is Recommendation => row != null);
+  let modelNote = rankingOffNote(env) ?? "AI read did not run. The mathematical read is shown.";
   try {
-    const ranked = await rankPassed(
-      [...ownedPassed, ...newPassed].map((item) => ({ row: item.recommendation, figures: item.figures })),
+    const read = await readIdeas(
+      recommendations
+        .filter((row) => row.figures)
+        .map((row) => ({
+          id: row.id,
+          symbol: row.symbol,
+          held: row.scope === "owned",
+          figures: row.figures as RankFigures,
+        })),
       env,
     );
-    owned = ranked.rows.filter((row) => row.scope === "owned");
-    newNames = ranked.rows.filter((row) => row.scope === "new");
-    modelNote = ranked.modelNote;
+    modelNote = read.modelNote;
+    if (read.model === "on") {
+      for (const row of recommendations) {
+        const opinion = read.byId.get(row.id);
+        row.ai = opinion
+          ? {
+              action: opinion.action,
+              reason: opinion.sentence ?? "The AI sentence was withheld because it did not cite a fetched figure.",
+            }
+          : null;
+      }
+    }
   } catch {
-    // A ranking failure leaves the rule rows in place. The scan still returns.
+    modelNote = "AI read did not run. The mathematical read is shown.";
   }
-  const keptStockBuys = newNames.filter((row) => row.assetClass === "us_equity").length;
+  const owned = recommendations.filter((row) => row.scope === "owned");
+  const newNames = recommendations.filter((row) => row.scope === "new");
+  const keptStockBuys = newNames.filter((row) => row.assetClass === "us_equity" && row.action === "buy").length;
   const keptCryptoBuys = newNames.filter((row) => row.assetClass === "crypto").length;
-  const recommendations = [...owned, ...newNames];
   const report = emptyReport({
     generatedAt: new Date().toISOString(),
     configured: true,
@@ -561,12 +655,70 @@ export async function runDesk(env: NodeJS.ProcessEnv = process.env): Promise<Des
       newCryptoBuys: keptCryptoBuys,
       note: notes.length > 0 ? notes.join(" ") : null,
       modelNote,
+      positionMarketValue,
+      reservedNotional: settled.reserved,
+      sleeveRoom: settled.room,
     },
     recommendations,
     blocker: null,
   });
   await writeStore({ recommendations, report });
   return report;
+}
+
+function cryptoSortKey(symbol: string, cap: number | undefined): number {
+  if (cap != null && cap > 0) return cap;
+  const base = symbol.split("/")[0].toUpperCase();
+  const index = CRYPTO_MAJORS.indexOf(base);
+  return index >= 0 ? CRYPTO_MAJORS.length - index : 0;
+}
+
+/** Buy and sell reads stay. Holds fill the card list so a quiet tape still shows crypto. */
+export function selectCryptoIdeas<T extends { recommendation: { action: DeskAction } }>(
+  rows: T[],
+  limit = CRYPTO_SHOW,
+): T[] {
+  const actionable = rows.filter((row) => row.recommendation.action !== "hold");
+  const holds = rows.filter((row) => row.recommendation.action === "hold");
+  const chosen = [...actionable];
+  const floor = Math.min(4, limit);
+  for (const hold of holds) {
+    if (chosen.length >= limit) break;
+    if (chosen.length >= floor && actionable.length >= floor) break;
+    chosen.push(hold);
+  }
+  if (chosen.length === 0) return holds.slice(0, Math.min(4, limit));
+  return chosen.slice(0, limit);
+}
+
+function toSleeveIdea(row: Recommendation): SleeveIdea {
+  const notional = row.order && (row.action === "buy" || row.action === "add") ? row.order.estimatedNotional : null;
+  return { symbol: row.symbol, assetClass: row.assetClass, action: row.action, notional };
+}
+
+function applyBuyNotional(row: Recommendation, idea: SleeveIdea & { kept: boolean }): Recommendation {
+  const controlsBuy = idea.kept
+    ? idea.action === "buy" || idea.action === "add"
+    : row.action === "buy" || row.action === "add";
+  if (!controlsBuy) return row;
+  if (idea.notional == null || !(idea.notional > 0)) {
+    return {
+      ...row,
+      order: null,
+      confirmable: false,
+      blocker: idea.kept
+        ? "Resized below a tradable size under the $15,000 sleeve."
+        : "No room left under the $15,000 sleeve.",
+    };
+  }
+  if (!row.order || row.order.side !== "buy") return { ...row, confirmable: false, blocker: row.blocker };
+  if (Math.abs(row.order.estimatedNotional - idea.notional) < 0.009) return row;
+  const resized = orderForNotional(row.order, idea.notional);
+  if (!resized) {
+    return { ...row, order: null, confirmable: false, blocker: "The sleeve room left cannot size this order." };
+  }
+  resized.reason = row.reason;
+  return { ...row, order: resized };
 }
 
 async function analyzeNew(input: {
@@ -596,28 +748,38 @@ async function analyzeNew(input: {
     fundamental = await pullFundamentals(input.symbol, technical.lastClose, input.tickers);
     decision = decide(technical, fundamental, writeResearch(technical, fundamental));
   }
-  if (decision.action !== "buy") return null;
-  const review: SleeveReview = {
-    symbol: input.symbol,
-    assetClass: input.assetClass,
-    owned: false,
-    qty: 0,
-    costBasis: 0,
-    action: "buy",
-    why: decision.why.join(" "),
-    price: technical.lastClose,
-    markAsOf: technical.asOf,
-    fractionable: input.asset?.fractionable === true,
-    minOrderSize: input.asset?.minOrderSize ?? null,
-    minTradeIncrement: input.asset?.minTradeIncrement ?? null,
-  };
-  const planned = planSleeve(emptyOwnedSleeve(input.budget), [review]);
-  const order = planned.buys[0] ?? null;
-  const skip = planned.notes.find((note) => note.symbol === input.symbol)?.why ?? (order ? null : CASH_SKIP);
-  const written = deskReason(factsFrom(input.symbol, "buy", technical, fundamental, input.marketCap, order, skip));
+  if (input.assetClass !== "crypto" && decision.action !== "buy") return null;
+  const mathAction: DeskAction = decision.action === "buy" ? "buy" : decision.action === "sell" ? "sell" : "hold";
+  let order: PlannedOrder | null = null;
+  let skip: string | null = null;
+  if (input.asset?.tradable === false) {
+    skip = "Alpaca does not mark this pair tradable. No order was sized.";
+  } else if (mathAction === "buy") {
+    const review: SleeveReview = {
+      symbol: input.symbol,
+      assetClass: input.assetClass,
+      owned: false,
+      qty: 0,
+      costBasis: 0,
+      action: "buy",
+      why: decision.why.join(" "),
+      price: technical.lastClose,
+      markAsOf: technical.asOf,
+      fractionable: input.asset?.fractionable === true,
+      minOrderSize: input.asset?.minOrderSize ?? null,
+      minTradeIncrement: input.asset?.minTradeIncrement ?? null,
+    };
+    const planned = planSleeve(emptyOwnedSleeve(input.budget), [review]);
+    order = planned.buys[0] ?? null;
+    skip = planned.notes.find((note) => note.symbol === input.symbol)?.why ?? (order ? null : CASH_SKIP);
+  } else {
+    skip = "No Alpaca paper order is sized. Nothing will be sent.";
+  }
+  const written = deskReason(factsFrom(input.symbol, mathAction, technical, fundamental, input.marketCap, order, skip));
   if (order) order.reason = written.reason;
   const confirmable = written.confirmable && order != null;
   const shown = confirmable ? order : null;
+  const figures = rankFigures(technical, fundamental, input.marketCap, shown);
   return {
     recommendation: {
       id: randomUUID(),
@@ -625,7 +787,10 @@ async function analyzeNew(input: {
       name: input.name,
       assetClass: input.assetClass,
       scope: "new",
-      action: "buy",
+      action: mathAction,
+      math: { action: mathAction, reason: written.reason },
+      ai: null,
+      figures,
       reason: written.reason,
       confirmable,
       blocker: confirmable ? null : (skip ?? "Not confirmable until both a technical figure and a fundamental figure are present."),
@@ -633,7 +798,7 @@ async function analyzeNew(input: {
       status: "recommendation",
       alpacaOrderId: null,
     },
-    figures: rankFigures(technical, fundamental, input.marketCap, shown),
+    figures,
   };
 }
 

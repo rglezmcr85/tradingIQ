@@ -36,16 +36,7 @@ export const dashboardHtml = `<!doctype html>
     </header>
     <main>
       <section class="stats" id="stats"></section>
-      <section class="split">
-        <div class="card">
-          <h2>Recommendations</h2>
-          <div id="scan-table"></div>
-        </div>
-        <div class="card">
-          <h2>Reason</h2>
-          <div id="detail">Scan the Alpaca paper portfolio to load recommendations.</div>
-        </div>
-      </section>
+      <section id="ideas"></section>
       <section class="card book">
         <h2>Sleeve and portfolio</h2>
         <div id="book"></div>

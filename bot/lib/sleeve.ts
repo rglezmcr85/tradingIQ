@@ -1,5 +1,5 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import type { AlpacaAsset } from "./alpaca-paper";
+import { asUsdPair, type AlpacaAsset } from "./alpaca-paper";
 import { dataDir, sleevePath } from "./paths";
 import { round2 } from "./paper";
 
@@ -127,6 +127,130 @@ export function spendable(cash: number, costBasisOpen: number): number {
 
 export function buyingPowerUsed(sleeve: SleeveFile): number {
   return round2(Math.min(SLEEVE_CAP, openCost(sleeve)));
+}
+
+export function markedSleeveValue(
+  sleeve: SleeveFile,
+  marks: Array<{ symbol: string; marketValue: number | null }>,
+): number {
+  return round2(sleeve.positions.reduce((sum, position) => {
+    const mark = marks.find((item) => sameSymbol(item.symbol, position.symbol));
+    if (mark?.marketValue != null && mark.marketValue > 0) return sum + mark.marketValue;
+    if (position.qty > 0 && position.markPrice > 0) return sum + position.qty * position.markPrice;
+    return sum + position.costBasis;
+  }, 0));
+}
+
+function sameSymbol(left: string, right: string): boolean {
+  if (left === right) return true;
+  const a = asUsdPair(left);
+  const b = asUsdPair(right);
+  return a != null && a === b;
+}
+
+export type SleeveIdea = {
+  symbol: string;
+  assetClass: SleeveAssetClass;
+  action: "buy" | "add" | "sell" | "hold";
+  notional: number | null;
+};
+
+function isBuyAdd(idea: SleeveIdea): boolean {
+  return (idea.action === "buy" || idea.action === "add") && idea.notional != null && idea.notional > 0;
+}
+
+function scaleBuys(capacity: number, ideas: SleeveIdea[]): Map<string, number> {
+  const sized = new Map<string, number>();
+  for (const idea of ideas) {
+    if (isBuyAdd(idea) && !sized.has(idea.symbol)) sized.set(idea.symbol, round2(idea.notional ?? 0));
+  }
+  let reserved = round2([...sized.values()].reduce((sum, value) => sum + value, 0));
+  if (reserved > capacity && reserved > 0) {
+    const scale = capacity / reserved;
+    for (const [symbol, notional] of sized) sized.set(symbol, round2(notional * scale));
+    reserved = round2([...sized.values()].reduce((sum, value) => sum + value, 0));
+    const drift = round2(reserved - capacity);
+    if (drift > 0) {
+      const last = [...sized.keys()].at(-1);
+      if (last) sized.set(last, round2(Math.max(0, (sized.get(last) ?? 0) - drift)));
+    }
+  }
+  return sized;
+}
+
+function interleave(ideas: SleeveIdea[]): SleeveIdea[] {
+  const stocks = ideas.filter((idea) => idea.assetClass === "us_equity");
+  const crypto = ideas.filter((idea) => idea.assetClass === "crypto");
+  const other = ideas.filter((idea) => idea.assetClass !== "us_equity" && idea.assetClass !== "crypto");
+  const ordered: SleeveIdea[] = [];
+  const count = Math.max(stocks.length, crypto.length);
+  for (let index = 0; index < count; index += 1) {
+    if (crypto[index]) ordered.push(crypto[index]);
+    if (stocks[index]) ordered.push(stocks[index]);
+  }
+  return [...ordered, ...other];
+}
+
+/**
+ * Kept unconfirmed buys stay. Their notional counts against the cap, with position market value.
+ * Fresh ideas are added only with the room that is left. Crypto is not dropped to fund stocks.
+ */
+export function settleSleeveIdeas(input: {
+  positionMarketValue: number;
+  slotsLeft: number;
+  kept: SleeveIdea[];
+  fresh: SleeveIdea[];
+}): { ideas: Array<SleeveIdea & { kept: boolean }>; reserved: number; room: number } {
+  const capacity = round2(Math.max(0, SLEEVE_CAP - Math.max(0, input.positionMarketValue)));
+  const fitted = scaleBuys(capacity, input.kept);
+  const reserved = round2([...fitted.values()].reduce((sum, value) => sum + value, 0));
+  let room = round2(Math.max(0, capacity - reserved));
+  let slots = Math.max(0, input.slotsLeft);
+  const keptSymbols = new Set(input.kept.map((idea) => idea.symbol));
+  const fresh = interleave(input.fresh.filter((idea) => !keptSymbols.has(idea.symbol)));
+  const freshOut: Array<SleeveIdea & { kept: boolean }> = [];
+  for (const idea of fresh) {
+    if (!isBuyAdd(idea)) {
+      freshOut.push({ ...idea, notional: null, kept: false });
+      continue;
+    }
+    const needsSlot = idea.action === "buy";
+    if ((needsSlot && slots <= 0) || room <= 0) {
+      freshOut.push({ ...idea, notional: null, kept: false });
+      continue;
+    }
+    const take = round2(Math.min(idea.notional ?? 0, room));
+    if (!(take > 0)) {
+      freshOut.push({ ...idea, notional: null, kept: false });
+      continue;
+    }
+    room = round2(room - take);
+    if (needsSlot) slots -= 1;
+    freshOut.push({ ...idea, notional: take, kept: false });
+  }
+  const keptOut: Array<SleeveIdea & { kept: boolean }> = input.kept.map((idea) => {
+    if (!isBuyAdd(idea)) return { ...idea, kept: true };
+    return { ...idea, notional: fitted.get(idea.symbol) ?? null, kept: true };
+  });
+  return { ideas: [...keptOut, ...freshOut], reserved, room };
+}
+
+export function orderForNotional(order: PlannedOrder, notional: number): PlannedOrder | null {
+  const price = order.estimatedPrice;
+  const target = round2(Math.min(Math.max(0, notional), order.estimatedNotional));
+  if (!(target > 0) || !(price > 0)) return null;
+  if (order.notional != null) {
+    return {
+      ...order,
+      notional: target.toFixed(2),
+      estimatedNotional: target,
+      estimatedQty: target / price,
+    };
+  }
+  const qty = Math.floor((target + 1e-9) / price);
+  if (qty < 1) return null;
+  const estimated = round2(qty * price);
+  return { ...order, qty: String(qty), estimatedQty: qty, estimatedNotional: estimated };
 }
 
 function qtyText(value: number): string {

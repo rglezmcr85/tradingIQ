@@ -1,13 +1,11 @@
 const statsEl = document.querySelector("#stats");
-const tableEl = document.querySelector("#scan-table");
-const detailEl = document.querySelector("#detail");
+const ideasEl = document.querySelector("#ideas");
 const bookEl = document.querySelector("#book");
 const footerEl = document.querySelector("#footer");
 const button = document.querySelector("#scan-button");
 const badge = document.querySelector("#live-badge");
 
 let state = null;
-let selected = null;
 
 function esc(value) {
   return String(value ?? "—")
@@ -34,26 +32,42 @@ function orderLabel(recommendation) {
   return `${order.side} ${order.qty}`;
 }
 
-function ideaTable(rows) {
-  if (!rows.length) return `<p class="muted">None.</p>`;
-  const body = rows
-    .map((row) => {
-      const active = row.id === selected ? "active" : "";
-      const confirm = row.confirmable && row.status === "recommendation"
-        ? `<button class="confirm" type="button" data-confirm="${esc(row.id)}">Confirm this order</button>`
-        : `<span class="muted">${esc(row.status === "confirmed" ? "Confirmed" : row.status === "rejected" ? "Not accepted" : "Not confirmable")}</span>`;
-      return `<tr class="${active}" data-id="${esc(row.id)}">
-        <td><strong>${esc(row.symbol)}</strong><div class="muted">${esc(row.assetClass)}</div></td>
-        <td class="${actionClass(row.action)}">${esc(row.action)}</td>
-        <td>${esc(orderLabel(row))}</td>
-        <td>${confirm}</td>
-      </tr>`;
-    })
-    .join("");
-  return `<table>
-    <thead><tr><th>Name</th><th>Idea</th><th>Order</th><th></th></tr></thead>
-    <tbody>${body}</tbody>
-  </table>`;
+function ideaCard(row) {
+  const math = row.math || { action: row.action, reason: row.reason };
+  const ai = row.ai;
+  const confirm = row.confirmable && row.status === "recommendation" && row.order
+    ? `<button class="confirm" type="button" data-confirm="${esc(row.id)}">Confirm this order</button>`
+    : `<span class="muted">${esc(row.status === "confirmed" ? "Confirmed" : row.status === "rejected" ? "Not accepted" : row.order ? "Not confirmable" : "No order")}</span>`;
+  const aiHtml = ai
+    ? `<div class="${actionClass(ai.action)}">${esc(ai.action)}</div><p>${esc(ai.reason)}</p>`
+    : `<p class="muted">AI read did not run.</p>`;
+  return `<article class="card idea">
+    <div class="idea-head">
+      <div>
+        <strong>${esc(row.symbol)}</strong>
+        <div class="muted">${esc(row.name || row.symbol)} · ${esc(row.assetClass)}</div>
+      </div>
+      <div>${esc(orderLabel(row))}</div>
+    </div>
+    <div class="reads">
+      <section class="read">
+        <div class="kicker">Mathematical</div>
+        <div class="${actionClass(math.action)}">${esc(math.action)}</div>
+        <p>${esc(math.reason)}</p>
+      </section>
+      <section class="read">
+        <div class="kicker">AI</div>
+        ${aiHtml}
+      </section>
+    </div>
+    ${row.blocker ? `<p class="sell">${esc(row.blocker)}</p>` : ""}
+    <p>${confirm}</p>
+  </article>`;
+}
+
+function ideaGroup(title, note, rows) {
+  const body = rows.length ? rows.map(ideaCard).join("") : `<p class="muted">None.</p>`;
+  return `<h2 class="group-title">${esc(title)}</h2><p class="muted">${esc(note)}</p>${body}`;
 }
 
 function render() {
@@ -68,7 +82,7 @@ function render() {
   const items = [
     ["Sleeve cap", `$${num(desk?.cap ?? 15000, 0)}`],
     ["Sleeve cash", `$${num(desk?.sleeveCash ?? 15000)}`],
-    ["Sleeve used", `$${num(desk?.buyingPowerUsed ?? 0)}`],
+    ["Sleeve room", `$${num(desk?.market?.sleeveRoom ?? desk?.cap ?? 15000, 0)}`],
     ["Alpaca equity", desk?.alpacaEquity == null ? "—" : `$${num(desk.alpacaEquity)}`],
     ["Ideas", String(desk?.recommendations?.length ?? 0)],
   ];
@@ -77,33 +91,26 @@ function render() {
     .join("");
 
   const recommendations = desk?.recommendations ?? [];
-  const ownedRows = recommendations.filter((row) => (row.scope ? row.scope === "owned" : row.action !== "buy"));
-  const newRows = recommendations.filter((row) => (row.scope ? row.scope === "new" : row.action === "buy"));
-  if (!selected && recommendations[0]) selected = recommendations[0].id;
+  const heldRows = recommendations.filter((row) => row.scope === "owned" || (row.scope == null && row.action !== "buy"));
+  const stockRows = recommendations.filter((row) => row.assetClass !== "crypto" && (row.scope === "new" || (row.scope == null && row.action === "buy")));
+  const cryptoRows = recommendations.filter((row) => row.assetClass === "crypto" && row.scope !== "owned");
   const blocker = desk?.blocker ? `<p>${esc(desk.blocker)}</p>` : "";
   const unset = desk?.unset?.length ? `<p>Unset: ${esc(desk.unset.join(", "))}</p>` : "";
   const market = desk?.market;
+  const roomLine = market
+    ? `<p class="muted">Sleeve cap $${num(desk?.cap ?? 15000, 0)}. Paper positions $${num(market.positionMarketValue ?? 0, 0)}. Unconfirmed buys kept from earlier scans $${num(market.reservedNotional ?? 0, 0)}. Room left $${num(market.sleeveRoom ?? 0, 0)}. No order is sent until you confirm that one.</p>`
+    : "";
   const marketLine = market
-    ? `<p class="muted">Market scan reviewed ${esc(market.stocksReviewed)} new stocks and ${esc(market.cryptoReviewed)} crypto pairs. New buys: ${esc(market.newStockBuys)} stocks, ${esc(market.newCryptoBuys)} crypto. No order is sent.</p>${market.modelNote ? `<p class="muted">${esc(market.modelNote)}</p>` : ""}${market.note ? `<p class="sell">${esc(market.note)}</p>` : ""}`
+    ? `<p class="muted">Reviewed ${esc(market.stocksReviewed)} new stocks and ${esc(market.cryptoReviewed)} crypto pairs. Stock buys ${esc(market.newStockBuys)}. Crypto ideas ${esc(market.newCryptoBuys)}.</p>${market.modelNote ? `<p class="muted">${esc(market.modelNote)}</p>` : ""}${market.note ? `<p class="sell">${esc(market.note)}</p>` : ""}`
     : recommendations.length
       ? ""
       : `<p class="muted">No recommendations yet. Scan portfolio does not send an order.</p>`;
-  tableEl.innerHTML = `${blocker}${unset}${marketLine}
-    <p class="kicker">Held names</p>
-    <p class="muted">Sell or add on names already in the paper account. Hold is not listed.</p>
-    ${ideaTable(ownedRows)}
-    <p class="kicker">New names</p>
-    <p class="muted">Buy ideas from the market scan, stocks and crypto, that he does not already hold.</p>
-    ${ideaTable(newRows)}`;
-  for (const tr of tableEl.querySelectorAll("tr[data-id]")) {
-    tr.addEventListener("click", () => {
-      selected = tr.dataset.id;
-      render();
-    });
-  }
-  for (const confirmButton of tableEl.querySelectorAll("button[data-confirm]")) {
-    confirmButton.addEventListener("click", async (event) => {
-      event.stopPropagation();
+  ideasEl.innerHTML = `${blocker}${unset}${roomLine}${marketLine}
+    ${ideaGroup("Held names", "Mathematical and AI reads on names already in the paper account.", heldRows)}
+    ${ideaGroup("New stocks", "Buy ideas that he does not already hold. A rescan keeps unconfirmed orders.", stockRows)}
+    ${ideaGroup("Crypto", "Alpaca USD pairs. Both reads are on the card.", cryptoRows)}`;
+  for (const confirmButton of ideasEl.querySelectorAll("button[data-confirm]")) {
+    confirmButton.addEventListener("click", async () => {
       confirmButton.disabled = true;
       confirmButton.textContent = "Sending";
       try {
@@ -113,21 +120,9 @@ function render() {
           body: JSON.stringify({ id: confirmButton.dataset.confirm }),
         });
       } catch (err) {
-        detailEl.innerHTML = `<p class="sell">${esc(err.message)}</p>`;
+        confirmButton.textContent = err.message;
       }
     });
-  }
-
-  const chosen = recommendations.find((row) => row.id === selected);
-  if (!chosen) {
-    detailEl.innerHTML = `<p class="muted">Select a recommendation. The reason has to include technicals and fundamentals. Unconfirmed ideas are not orders.</p>`;
-  } else {
-    detailEl.innerHTML = `
-      <div class="kicker">${esc(chosen.status)}</div>
-      <h2>${esc(chosen.symbol)} <span class="${actionClass(chosen.action)}">${esc(chosen.action)}</span></h2>
-      <p>${esc(chosen.reason)}</p>
-      ${chosen.blocker ? `<p class="sell">${esc(chosen.blocker)}</p>` : ""}
-    `;
   }
 
   const portfolio = desk?.portfolio ?? [];
@@ -165,7 +160,7 @@ button.addEventListener("click", async () => {
   try {
     await load("/api/scan", { method: "POST" });
   } catch (err) {
-    detailEl.innerHTML = `<p class="sell">${esc(err.message)}</p>`;
+    ideasEl.innerHTML = `<p class="sell">${esc(err.message)}</p>`;
   } finally {
     button.disabled = false;
     button.textContent = "Scan portfolio";
@@ -173,5 +168,5 @@ button.addEventListener("click", async () => {
 });
 
 load("/api/state").catch((err) => {
-  detailEl.textContent = err.message;
+  ideasEl.textContent = err.message;
 });
